@@ -1,0 +1,68 @@
+[
+  {
+    "id": "victor-orlov",
+    "name": "Виктор Орлов",
+    "role": "директор",
+    "file": "victor-orlov.png"
+  },
+  {
+    "id": "boris-gromov",
+    "name": "Борис Громов",
+    "role": "заместитель директора",
+    "file": "boris-gromov.png"
+  },
+  {
+    "id": "elena-mironova",
+    "name": "Елена Миронова",
+    "role": "наставница",
+    "file": "elena-mironova.png"
+  },
+  {
+    "id": "alisa-mironova",
+    "name": "Алиса Миронова",
+    "role": "архивист",
+    "file": "alisa-mironova.png"
+  },
+  {
+    "id": "arkady-belkin",
+    "name": "Аркадий Белкин",
+    "role": "кадровик",
+    "file": "arkady-belkin.png"
+  },
+  {
+    "id": "maxim-volkov",
+    "name": "Максим Волков",
+    "role": "системный администратор",
+    "file": "maxim-volkov.png"
+  },
+  {
+    "id": "anna-volkova",
+    "name": "Анна Волкова",
+    "role": "специалистка по цифровизации",
+    "file": "anna-volkova.png"
+  },
+  {
+    "id": "zinaida-kuznetsova",
+    "name": "Зинаида Кузнецова",
+    "role": "техничка",
+    "file": "zinaida-kuznetsova.png"
+  },
+  {
+    "id": "nikolay-fomin",
+    "name": "Николай Фомин",
+    "role": "охранник",
+    "file": "nikolay-fomin.png"
+  },
+  {
+    "id": "konstantin-vorontsov",
+    "name": "Константин Воронцов",
+    "role": "ведущий исследователь",
+    "file": "konstantin-vorontsov.png"
+  },
+  {
+    "id": "timofey-rudnev",
+    "name": "Тимофей Руднев",
+    "role": "реставратор",
+    "file": "timofey-rudnev.png"
+  }
+]
