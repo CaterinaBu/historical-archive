@@ -6,7 +6,7 @@
 Каждому персонажу соответствует один PNG с характерным выражением лица.
 ФИО и должность выводятся средствами интерфейса, а не на изображении.
 
-Расположение файлов: assets/characters/avatars/
+Расположение файлов: assets/avatars/
 
 ПЕРЕЧЕНЬ АВАТАРОК
 
@@ -51,8 +51,8 @@ timofey-rudnev.png — Тимофей Руднев, реставратор
 
 ПОДКЛЮЧЕНИЕ В ИГРЕ
 
-Если папка размещена в public/assets/characters/avatars/, адрес файла выглядит так:
-/assets/characters/avatars/elena-mironova.png
+Если папка размещена в public/assets/avatars/, адрес файла выглядит так:
+/assets/avatars/elena-mironova.png
 
 Пример CSS:
 .character-avatar {
