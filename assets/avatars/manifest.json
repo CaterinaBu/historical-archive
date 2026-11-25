@@ -64,5 +64,11 @@
     "name": "Тимофей Руднев",
     "role": "реставратор",
     "file": "timofey-rudnev.png"
+  },
+  {
+    "id": "player",
+    "name": "Игрок",
+    "role": "игрок",
+    "file": "player-avatar.png"
   }
 ]
