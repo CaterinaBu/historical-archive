@@ -1,0 +1,43 @@
+{
+  "files": [
+    {
+      "file": "walking-along.mp3",
+      "role": "background",
+      "duration_seconds": 143.517,
+      "source": "Kevin MacLeod — Walking Along",
+      "source_url": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100020",
+      "source_license": "CC-BY-4.0",
+      "sha256": "514aa7f49fe774bd64bdbd1fac2cfae945dd4de6c970e15deec2ae7e12ff4097"
+    },
+    {
+      "file": "correct.wav",
+      "role": "correct",
+      "duration_seconds": 1.85,
+      "source": "Virtuosity Drums",
+      "source_url": "https://versilian-studios.com/virtuosity-drums/",
+      "source_license": "CC0-1.0",
+      "sha256": "1778aab5df9a3a8132a32c482c4f62d9cbb569b80361ac25f87ca0756b944f0c"
+    },
+    {
+      "file": "incorrect.wav",
+      "role": "incorrect",
+      "duration_seconds": 1.65,
+      "source": "D. Smolken’s Double Bass",
+      "source_url": "https://shop.karoryfer.com/pages/d-smolkens-double-bass",
+      "source_license": "CC0-1.0",
+      "sha256": "97a037f0ef9afafc3bdce17936ed46e7a2317dbca121ae6658a02e2bdc9e74a6"
+    },
+    {
+      "file": "event.wav",
+      "role": "event",
+      "duration_seconds": 2,
+      "source": "VCSL Vibraphone / Soft Mallets",
+      "source_url": "https://github.com/sgossner/VCSL",
+      "source_license": "CC0-1.0",
+      "sha256": "e7813bfc1c4e52c03f32dcd4b7a39ab48031c5e50ca6cb3e887f45ba6dbb1318"
+    }
+  ],
+  "music_attribution": "\"Walking Along\" Kevin MacLeod (incompetech.com) — Creative Commons Attribution 4.0 International, https://creativecommons.org/licenses/by/4.0/",
+  "music_modifications": "Original supplied MP3, unchanged.",
+  "sample_license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+}
