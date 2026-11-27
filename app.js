@@ -2,11 +2,14 @@ import { loadArchiveContent } from './content/load.js';
 import { createArchiveAudio } from './audio.js';
 import { displayField, dailyValuePools, dailyQuestionRecords } from './daily.js';
 import { createQuizBank, sample } from './questions.js';
+import { quizProgress } from './progress-api.js';
 
 const DATA = await loadArchiveContent();
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 const live = document.querySelector('#announcements');
+const databaseProgress = document.body.dataset.progress === 'database';
+const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'lastNormalResult']);
 const sound = createArchiveAudio(DATA.audio);
 const icons = {
   archive:'<path d="M4 6h16v4H4zM6 10v9h12v-9M10 14h4M9 6l2-2h6l2 2"/>',
@@ -110,11 +113,21 @@ function failStorage(error) {
 
 function save() {
   try {
-    localStorage.setItem(storageKey, JSON.stringify(state));
+    const local = databaseProgress
+      ? Object.fromEntries(Object.entries(state).filter(([field]) => !databaseFields.has(field)))
+      : state;
+    localStorage.setItem(storageKey, JSON.stringify(local));
   } catch (error) {
     failStorage(error);
     throw error;
   }
+}
+
+function applyDatabaseProgress(progress) {
+  const { facts, discovered, earned, reputation, daily, yesterday, lastNormalResult, calendarDay } = progress;
+  Object.assign(state, { facts, discovered, earned, paid:0, reputation, daily, lastNormalResult, calendarDay,
+    dailyYesterday:{score:yesterday} });
+  state.finaleAvailable=count(state.facts)===count(DATA.facts);
 }
 
 const money = () => state.earned+state.paid;
@@ -137,6 +150,8 @@ let modalKey = null;
 let modalPrevious = null;
 let scrollForPop = 0;
 let redirectAfterTutorial = null;
+let quizRequestPending = false;
+let retryQuizRequest = null;
 const isPartyPage = page => page==='question'||page==='result';
 function setRoute(next, replace = false) {
   const leavingParty=isPartyPage(route.page)&&!isPartyPage(next.page);
@@ -173,6 +188,10 @@ function back() {
   if (route.page !== 'home') restore({page:'home'},[]);
 }
 window.addEventListener('popstate', ({state: locationState}) => {
+  if (quizRequestPending) {
+    history.pushState({archive:true,route,navigation},'');
+    return;
+  }
   let next = locationState?.archive ? locationState.route : {page:'home'};
   let stack = locationState?.navigation ?? [];
   if (next.page==='dossier') next=stack.at(-1)?.page==='category'?stack.pop():{page:'collection'};
@@ -316,7 +335,7 @@ function salaryDialog(paidToday) {
   ${button('Понятно','dismiss')}${paidToday?'<small class="secret">Пароль: КАРТОТЕКА</small>':''}`);
 }
 function firstDailyEntry() {
-  if (!state.started || state.dayNumber===1 || state.lastSalary===state.dayNumber) return;
+  if (databaseProgress || !state.started || state.dayNumber===1 || state.lastSalary===state.dayNumber) return;
   state.lastSalary=state.dayNumber;
   state.earned+=30;
   chooseSalaryJoke();
@@ -343,7 +362,7 @@ function changeDay(pause = 1, {deferNotices = false} = {}) {
   flushNotices();
 }
 function syncMoscowDay(deferNotices = false) {
-  if (storageFailed || !state) return;
+  if (databaseProgress || storageFailed || !state) return;
   const today=moscowDay();
   const elapsed=today-state.observedMoscowDay;
   if (elapsed>0) {
@@ -369,8 +388,9 @@ function home() {
     </div>
     <div class="stack">
       <h2>Сегодня в архиве</h2>
-      ${modeCard('Игра дня',todayResult()?'Готово. Открыть итог':'Одна личность. Одно дело в день','daily','', 'calendar')}
-      ${modeCard('Ежедневная зарплата',state.dayNumber===1?'Со второго календарного дня':state.lastSalary===state.dayNumber?'Сегодня начислена':'К выдаче','salary','', 'clip')}
+      ${databaseProgress ? note('Тест сохранений', 'В этой сборке доступна обычная викторина. Открытые факты, заработанные скрепки и очки сохраняются в базе.') :
+        modeCard('Игра дня',todayResult()?'Готово. Открыть итог':'Одна личность. Одно дело в день','daily','', 'calendar')+
+        modeCard('Ежедневная зарплата',state.dayNumber===1?'Со второго календарного дня':state.lastSalary===state.dayNumber?'Сегодня начислена':'К выдаче','salary','', 'clip')}
       <div class="surface stack compact">
         <h3>Восстановление архива</h3>
         <div class="ratio"><strong>${number(count(state.facts))}</strong> из ${number(count(DATA.facts))} фактов</div>
@@ -432,9 +452,41 @@ function start(mode) {
     return;
   }
   if (mode==='day' && todayResult()) {go('result',{mode:'day',day:state.dayNumber});return;}
+  if (databaseProgress) {
+    const id = crypto.randomUUID();
+    performQuizRequest(() => quizProgress.start(id), round => {
+      applyDatabaseProgress(round.progress);
+      Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
+      session={id:round.id,mode:'normal',day:round.progress.calendarDay,questions:round.questions,index:0,
+        attempted:null,wrong:null,feedback:null,hints:{},removed:null};
+      go('question');
+    });
+    return;
+  }
   session={mode,day:state.dayNumber,questions:mode==='day'?dailyQuestions(dailyPerson()):quizBank.start(state.facts),index:0,correct:0,newPeople:0,newFacts:0,
     attempted:null,wrong:null,feedback:null,hints:{},removed:null, retryUsed:false};
   go('question');
+}
+
+async function performQuizRequest(request, apply) {
+  if (quizRequestPending) return;
+  retryQuizRequest = null;
+  quizRequestPending = true;
+  app.setAttribute('aria-busy','true');
+  let result;
+  try {
+    result = await request();
+  } catch (error) {
+    const retryable = !error.status || error.status >= 500;
+    if (retryable) retryQuizRequest = () => performQuizRequest(request, apply);
+    const message = retryable ? 'Проверьте соединение с тестовым сервером и повторите действие.' : error.message;
+    showDialog('quiz-error','Не удалось продолжить',`<p>${label(message)}</p>${button(retryable?'Повторить':'Закрыть',retryable?'retry-quiz':'dismiss')}`);
+    return;
+  } finally {
+    quizRequestPending = false;
+    app.removeAttribute('aria-busy');
+  }
+  apply(result);
 }
 function question() {
   const q=currentQuestion();
@@ -459,7 +511,7 @@ function question() {
     ${final?note(session.feedback.title,session.feedback.text,`feedback ${session.feedback.correct?'good':'bad'}`):session.rewardRetry?note('Есть вторая попытка','Выберите другой ответ.','feedback bad'):session.hints.retry?note('Право на ошибку активно','') : ''}
     <div class="question-controls">
     ${final?button(session.index+1===session.questions.length?'К результатам':'Следующий вопрос','question-next',{icon:'arrow'}):
-    !day?button('Подсказки','hints',{style:'btn secondary',icon:'info'}):''}
+    !day&&!databaseProgress?button('Подсказки','hints',{style:'btn secondary',icon:'info'}):''}
     </div>
   </div>`;
 }
@@ -467,6 +519,25 @@ function answer(index) {
   syncMoscowDay();
   const q=currentQuestion();
   if (!Number.isInteger(index) || index<0 || index>=q.options.length || session.feedback || index===session.removed || index===session.wrong) return;
+  if (databaseProgress) {
+    performQuizRequest(() => quizProgress.answer(session.id,session.index,index), receipt => {
+      applyDatabaseProgress(receipt.progress);
+      session.attempted=index;
+      session.feedback=receipt.feedback;
+      session.finished=Boolean(receipt.result);
+      q.right=receipt.right;
+      sound.play(receipt.feedback.correct?'correct':'incorrect');
+      if (!receipt.feedback.correct) earnedFind('10');
+      checkProgress(receipt.person);
+      if (session.finished) checkMoney();
+      save();
+      render(false);
+      app.querySelector('[data-action="question-next"]')?.focus();
+      announces(receipt.feedback.title);
+      flushNotices();
+    });
+    return;
+  }
   const isRight=q.right===index;
   sound.play(isRight?'correct':'incorrect');
   const discoveredNow=!state.discovered[q.person];
@@ -534,6 +605,20 @@ function revealResult() {
 }
 function exitConfirm() {
   showDialog('exit','Завершить досрочно?',`<p>${label('Обнаруженные личности и открытые факты сохранятся. Скрепки и очки за незавершённую партию сгорят. В следующий раз начнётся новая попытка.')}</p><div class="buttons">${button('Продолжить игру','dismiss',{style:'btn secondary'})}${button('Выйти','exit',{style:'btn danger'})}</div>`);
+}
+function exitParty() {
+  closeDialog(false);
+  const leave = () => {
+    session=null;
+    history.back();
+    setTimeout(flushNotices,100);
+  };
+  if (!databaseProgress) {leave();return;}
+  performQuizRequest(() => quizProgress.abandon(session.id), result => {
+    applyDatabaseProgress(result.progress);
+    if (result.finished) revealResult();
+    else leave();
+  });
 }
 function daily() {
   syncMoscowDay(true);
@@ -635,7 +720,7 @@ function personCard(id, person) {
       <ul class="person-facts" id="person-facts-${id}">${facts}</ul>
       ${active?`<div class="research-controls" id="research-${id}"><p class="small subtle">${route.fact?'Факт выбран.':'Выберите закрытый факт для справки.'}</p>${controls}
         ${button('Закрыть исследование','toggle-research',{id,style:'person-research',attrs:'aria-expanded="true"'})}</div>`:
-        complete?'':button('Исследование','toggle-research',{id,style:'person-research',attrs:`aria-label="Исследование: ${e(person.name)}" aria-expanded="false"`})}
+        complete||databaseProgress?'':button('Исследование','toggle-research',{id,style:'person-research',attrs:`aria-label="Исследование: ${e(person.name)}" aria-expanded="false"`})}
     </div></article>`;
 }
 function category() {
@@ -785,7 +870,7 @@ function personalScore(score) {
 function ratings() {
   const current=route.tab || 'reputation';
   const controls=tabs([['reputation','Репутация'],['day','Настрой дня']],current,'rating-tab','Рейтинг');
-  return `<div class="stack">${sectionHeading('Рейтинги',controls,'Здесь показаны очки из этого браузера. Общие рейтинги появятся после подключения VK.')}
+  return `<div class="stack">${sectionHeading('Рейтинги',controls,databaseProgress?'Здесь показаны ваши очки из тестовой базы.':'Здесь показаны очки из этого браузера. Общие рейтинги появятся после подключения VK.')}
    <p class="small subtle">${current==='reputation'?'Очки накапливаются без сброса.':'Суточный рейтинг обновляется в 00:00 МСК.'}</p>
    ${current==='reputation'?`<section class="surface">${personalScore(state.reputation)}</section>`:`<div class="daily-ranks">
      <section class="surface stack compact" aria-labelledby="today-title"><h2 id="today-title">Сегодня</h2>${personalScore(state.daily)}</section>
@@ -795,6 +880,7 @@ function ratings() {
    </div>`;
 }
 function shop() {
+  if (databaseProgress) return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}${note('Магазин пока закрыт','В тестовой сборке можно заработать скрепки в обычной викторине.')}</div>`;
   return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}
    ${listItem('Пополнить баланс','Пакеты скрепок за голоса VK','topup','','clip')}
    <section class="stack" aria-labelledby="shop-hints">
@@ -1029,7 +1115,8 @@ const actions = {
     flushNotices();},
   start, daily, salary:()=>{if (state.started&&state.dayNumber>1&&state.lastSalary!==state.dayNumber) flushNotices();else salaryDialog(state.lastSalary===state.dayNumber);},
   answer:id=>answer(Number(id)), 'question-next':endQuestion,
-  exit:()=>{closeDialog(false);session=null;history.back();setTimeout(flushNotices,100);},
+  exit:exitParty,
+  'retry-quiz':()=>{closeDialog(false);retryQuizRequest?.();},
   hints, hint:id=>{if (!session || session.mode==='day')return;if (state.inventory[id]) applyHint(id,false);else
     purchaseDialog(hintInfo[id].name,`${hintInfo[id].desc} В цену включена наценка 50%. В магазине заранее дешевле.`,hintInfo[id].now,'rush',id);},
   rush:id=>applyHint(id,true),
@@ -1082,20 +1169,21 @@ document.addEventListener('visibilitychange',()=>{
   if (!document.hidden) syncMoscowDay();
 });
 document.addEventListener('click', event=>{
-  if (!state || storageFailed) return;
+  if (!state || storageFailed || quizRequestPending) return;
   sound.unlock(state);
   const control=event.target.closest('[data-action]');
   if (control&&!control.disabled&&control.getAttribute('aria-disabled')!=='true') actions[control.dataset.action]?.(control.dataset.id);
 });
-export function startArchive(key, onStorageError) {
+export async function startArchive(key, onStorageError) {
   storageKey = key;
   handleStorageError = onStorageError;
   state = initialState();
   try {
     const raw = localStorage.getItem(storageKey);
     if (raw) state = { ...state, ...JSON.parse(raw) };
+    if (databaseProgress) applyDatabaseProgress(await quizProgress.load());
     Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
-    localStorage.setItem(storageKey, JSON.stringify(state));
+    save();
   } catch (error) {
     failStorage(error);
     return false;
@@ -1105,6 +1193,6 @@ export function startArchive(key, onStorageError) {
   promptForAudio();
   syncMoscowDay();
   flushNotices();
-  window.setInterval(syncMoscowDay, 15000);
+  if (!databaseProgress) window.setInterval(syncMoscowDay, 15000);
   return true;
 }

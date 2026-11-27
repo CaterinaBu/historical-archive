@@ -76,13 +76,14 @@ export function createArchiveContent(dataset, story, salaryJokes, avatars, audio
   };
 }
 
+export const archiveContentPaths = [
+  'data/historical_archive_data.json',
+  'content/dialogues/istoricheskiy_arhiv_dialogues.json',
+  'content/salary/salary-jokes.json',
+  'assets/avatars/manifest.json',
+  'assets/audio/manifest.json',
+];
+
 export async function loadArchiveContent() {
-  const paths = [
-    'data/historical_archive_data.json',
-    'content/dialogues/istoricheskiy_arhiv_dialogues.json',
-    'content/salary/salary-jokes.json',
-    'assets/avatars/manifest.json',
-    'assets/audio/manifest.json',
-  ];
-  return createArchiveContent(...await Promise.all(paths.map(loadJson)));
+  return createArchiveContent(...await Promise.all(archiveContentPaths.map(loadJson)));
 }

@@ -15,17 +15,20 @@ function showStatus(message) {
   app.replaceChildren(panel);
 }
 
-const storageKey = 'historical-archive-progress-v1';
+const databaseProgress = document.body.dataset.progress === 'database';
+const storageKey = databaseProgress ? 'historical-archive-database-settings-v1' : 'historical-archive-progress-v1';
 
 function onStorageError(error) {
   console.error(error);
-  showStatus('Не удалось сохранить прогресс. Проверьте, разрешено ли браузеру хранить данные сайта, и попробуйте снова.');
+  showStatus(databaseProgress
+    ? 'Не удалось открыть тестовое сохранение. Проверьте, запущен ли сервер, и попробуйте снова.'
+    : 'Не удалось сохранить прогресс. Проверьте, разрешено ли браузеру хранить данные сайта, и попробуйте снова.');
 }
 
 async function start() {
   try {
     const { startArchive } = await import('./app.js');
-    return startArchive(storageKey, onStorageError);
+    return await startArchive(storageKey, onStorageError);
   } catch (error) {
     console.error(error);
     showStatus('Не удалось открыть архив. Попробуйте загрузить игру снова.');
