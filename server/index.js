@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { archiveContentPaths, createArchiveContent } from '../content/load.js';
 import { openDatabase } from './database.js';
 import { createQuiz, RequestError } from './quiz.js';
+import { createVkLaunchVerifier } from './vk-launch.js';
 
 const cookieName = 'archive-local-player';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
@@ -51,9 +52,18 @@ async function readAnswer(request) {
   return { position, choice };
 }
 
-async function handleApi(request, response, path, quiz) {
-  const player = request.headers.cookie?.match(playerCookie)?.[1];
-  if (request.method === 'GET' && path === '/api/progress') {
+async function handleApi(request, response, path, quiz, vk) {
+  const loadProgress = request.method === 'GET' && path === '/api/progress';
+  let player;
+  if (vk) {
+    const userId = vk.verify(request.headers.authorization);
+    if (!userId) throw new RequestError(401, 'Откройте игру заново из ВКонтакте.');
+    player = await quiz.vkPlayer(vk.appId, userId, loadProgress);
+    if (loadProgress) return json(response, 200, { ...await quiz.progress(player), settingsProfile: player });
+  } else {
+    player = request.headers.cookie?.match(playerCookie)?.[1];
+  }
+  if (loadProgress) {
     const existing = player && await quiz.progress(player);
     if (existing) return json(response, 200, existing);
     const id = randomUUID();
@@ -74,16 +84,19 @@ async function handleApi(request, response, path, quiz) {
   throw new RequestError(405, 'Метод не поддерживается.');
 }
 
-async function serveBrowser(request, response, path, index) {
+async function serveBrowser(request, response, path, index, vkBridge) {
   if (request.method !== 'GET' && request.method !== 'HEAD') throw new RequestError(405, 'Метод не поддерживается.');
   const name = path === '/' ? 'index.html' : path.slice(1);
   if (name === 'index.html') {
-    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+    });
     response.end(request.method === 'HEAD' ? undefined : index);
     return;
   }
-  if (!browserFiles.has(name) && !mediaFile.test(name)) throw new RequestError(404, 'Файл не найден.');
-  const file = new URL(name, root);
+  const file = vkBridge && name === 'vendor/vk-bridge.js' ? vkBridge :
+    (browserFiles.has(name) || mediaFile.test(name)) ? new URL(name, root) : null;
+  if (!file) throw new RequestError(404, 'Файл не найден.');
   const entry = await stat(file).catch(error => {
     if (error.code === 'ENOENT') throw new RequestError(404, 'Файл не найден.');
     throw error;
@@ -93,20 +106,28 @@ async function serveBrowser(request, response, path, index) {
   else await pipeline(createReadStream(file), response);
 }
 
-export async function createArchiveServer(database, now) {
+export async function createArchiveServer(database, now = () => new Date(), vkConfig = {}) {
+  const { appId, secret, tunnelHost } = vkConfig;
+  const vk = appId || secret ? { appId, verify: createVkLaunchVerifier(appId, secret, now) } : null;
+  if (tunnelHost && (!vk || !/^[a-z0-9][a-z0-9.-]+(?::\d+)?$/i.test(tunnelHost))) {
+    throw new Error('В VK_TUNNEL_HOST укажите имя тестового хоста без протокола и пути.');
+  }
   const read = name => readFile(new URL(name, root), 'utf8');
   const [html, ...sources] = await Promise.all([read('index.html'), ...archiveContentPaths.map(read)]);
-  const index = html.replace('<body>', '<body data-progress="database">');
+  const vkBridge = vk ? new URL(import.meta.resolve('@vkontakte/vk-bridge/dist/browser.min.js')) : null;
+  let index = html.replace('<body>', vk ? '<body data-progress="database" data-platform="vk">' : '<body data-progress="database">');
+  if (vk) index = index.replace('<script type="module"', '<script src="vendor/vk-bridge.js"></script>\n<script type="module"');
   const quiz = createQuiz(database, createArchiveContent(...sources.map(source => JSON.parse(source))), now);
 
   return createServer(async (request, response) => {
     try {
-      if (!/^(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(request.headers.host ?? '')) {
+      const host = request.headers.host ?? '';
+      if (!/^(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(host) && host.toLowerCase() !== tunnelHost?.toLowerCase()) {
         throw new RequestError(403, 'Локальный сервер доступен только с этого компьютера.');
       }
       const { pathname } = new URL(request.url, 'http://localhost');
-      if (pathname.startsWith('/api/')) await handleApi(request, response, pathname, quiz);
-      else await serveBrowser(request, response, pathname, index);
+      if (pathname.startsWith('/api/')) await handleApi(request, response, pathname, quiz, vk);
+      else await serveBrowser(request, response, pathname, index, vkBridge);
     } catch (error) {
       if (response.headersSent || response.destroyed) return;
       if (error instanceof RequestError) json(response, error.status, { error: error.message });
@@ -121,7 +142,9 @@ export async function createArchiveServer(database, now) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const database = await openDatabase({ url: process.env.DATABASE_URL });
   try {
-    const server = await createArchiveServer(database);
+    const server = await createArchiveServer(database, undefined, {
+      appId: process.env.VK_APP_ID, secret: process.env.VK_APP_SECRET, tunnelHost: process.env.VK_TUNNEL_HOST,
+    });
     const port = Number(process.env.PORT ?? 3000);
     await new Promise((resolve, reject) => server.listen(port, '127.0.0.1', resolve).once('error', reject));
     console.log(`Исторический архив: http://127.0.0.1:${server.address().port}`);

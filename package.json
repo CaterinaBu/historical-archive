@@ -4,10 +4,12 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
+    "start:vk": "node --env-file=.env.vk.local server/index.js",
     "test": "node --test"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.6.0",
+    "@vkontakte/vk-bridge": "^3.0.2",
     "pg": "^8.23.1"
   }
 }

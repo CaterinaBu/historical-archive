@@ -16,10 +16,15 @@ function showStatus(message) {
 }
 
 const databaseProgress = document.body.dataset.progress === 'database';
+const vkLaunch = document.body.dataset.platform === 'vk';
 const storageKey = databaseProgress ? 'historical-archive-database-settings-v1' : 'historical-archive-progress-v1';
 
 function onStorageError(error) {
   console.error(error);
+  if (vkLaunch && error.status === 401) {
+    showStatus('Откройте игру заново из ВКонтакте.');
+    return;
+  }
   showStatus(databaseProgress
     ? 'Не удалось открыть тестовое сохранение. Проверьте, запущен ли сервер, и попробуйте снова.'
     : 'Не удалось сохранить прогресс. Проверьте, разрешено ли браузеру хранить данные сайта, и попробуйте снова.');
@@ -27,6 +32,7 @@ function onStorageError(error) {
 
 async function start() {
   try {
+    if (vkLaunch) window.vkBridge?.send('VKWebAppInit').catch(() => console.warn('VK Bridge не подтвердил запуск.'));
     const { startArchive } = await import('./app.js');
     return await startArchive(storageKey, onStorageError);
   } catch (error) {
@@ -36,7 +42,9 @@ async function start() {
   }
 }
 
-if (navigator.locks) {
+if (vkLaunch) {
+  await start();
+} else if (navigator.locks) {
   navigator.locks.request(storageKey, { ifAvailable: true }, async lock => {
     if (!lock) {
       showStatus('Архив уже открыт в другой вкладке. Закройте её и нажмите «Повторить».');

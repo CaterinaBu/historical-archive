@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises';
 
 export async function openDatabase({ url, directory = '.local-postgres' } = {}) {
-  const schema = await readFile(new URL('001-quiz-progress.sql', import.meta.url), 'utf8');
+  const migrations = await Promise.all(['001-quiz-progress.sql', '002-vk-identity.sql']
+    .map(file => readFile(new URL(file, import.meta.url), 'utf8')));
   if (!url) {
     const { PGlite } = await import('@electric-sql/pglite');
     const database = await PGlite.create(directory);
     try {
-      await database.exec(schema);
+      for (const sql of migrations) await database.exec(sql);
       return database;
     } catch (error) {
       await database.close();
@@ -35,7 +36,9 @@ export async function openDatabase({ url, directory = '.local-postgres' } = {}) 
     },
   };
   try {
-    await database.transaction(connection => connection.query(schema));
+    await database.transaction(async connection => {
+      for (const sql of migrations) await connection.query(sql);
+    });
     return database;
   } catch (error) {
     await database.close();

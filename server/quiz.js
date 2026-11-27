@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createQuizBank } from '../questions.js';
 import { displayField } from '../daily.js';
 
@@ -51,6 +52,16 @@ export function createQuiz(database, data, now = () => new Date()) {
   return {
     progress: playerId => progress(database, playerId, dateFor(now)),
     createPlayer: playerId => database.query('INSERT INTO archive_players (id) VALUES ($1)', [playerId]),
+    async vkPlayer(appId, userId, create) {
+      if (create) {
+        await database.query(`INSERT INTO archive_players (id, vk_app_id, vk_user_id) VALUES ($1, $2, $3)
+          ON CONFLICT (vk_app_id, vk_user_id) DO NOTHING`, [randomUUID(), appId, userId]);
+      }
+      const { rows: [player] } = await database.query(
+        'SELECT id FROM archive_players WHERE vk_app_id = $1 AND vk_user_id = $2', [appId, userId],
+      );
+      return player?.id;
+    },
 
     start(playerId, id) {
       return database.transaction(async connection => {

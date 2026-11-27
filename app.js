@@ -9,6 +9,7 @@ const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 const live = document.querySelector('#announcements');
 const databaseProgress = document.body.dataset.progress === 'database';
+const vkLaunch = document.body.dataset.platform === 'vk';
 const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'lastNormalResult']);
 const sound = createArchiveAudio(DATA.audio);
 const icons = {
@@ -118,6 +119,7 @@ function save() {
       : state;
     localStorage.setItem(storageKey, JSON.stringify(local));
   } catch (error) {
+    if (vkLaunch && (error.name === 'SecurityError' || error.name === 'QuotaExceededError')) return;
     failStorage(error);
     throw error;
   }
@@ -1175,17 +1177,26 @@ document.addEventListener('click', event=>{
   if (control&&!control.disabled&&control.getAttribute('aria-disabled')!=='true') actions[control.dataset.action]?.(control.dataset.id);
 });
 export async function startArchive(key, onStorageError) {
-  storageKey = key;
   handleStorageError = onStorageError;
   state = initialState();
   try {
-    const raw = localStorage.getItem(storageKey);
+    const progress = databaseProgress ? await quizProgress.load() : null;
+    storageKey = progress?.settingsProfile ? `${key}-${progress.settingsProfile}` : key;
+    let raw;
+    try {
+      raw = localStorage.getItem(storageKey);
+    } catch (error) {
+      if (!vkLaunch || error.name !== 'SecurityError') throw error;
+    }
     if (raw) state = { ...state, ...JSON.parse(raw) };
-    if (databaseProgress) applyDatabaseProgress(await quizProgress.load());
+    if (progress) {
+      applyDatabaseProgress(progress);
+      if (vkLaunch && count(state.discovered)) state.started = true;
+    }
     Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
     save();
   } catch (error) {
-    failStorage(error);
+    if (!storageFailed) failStorage(error);
     return false;
   }
 
