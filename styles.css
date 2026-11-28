@@ -130,6 +130,7 @@ main:focus{outline:none}
 .nav-button:hover{background:#eae3d1}
 #app{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;min-width:0}
 body[data-platform=vk] #app{height:100vh;height:100dvh;min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
+body[data-platform=vk] #app.quiz-page{overscroll-behavior-y:auto}
 #app>main{flex:1 0 auto}
 #app.has-nav>main{padding-bottom:calc(83px + env(safe-area-inset-bottom,0px))}
 .footer{margin-top:20px;border-top:1px solid var(--line);padding-top:8px}

@@ -535,7 +535,7 @@ function answer(index) {
       if (session.finished) checkMoney();
       save();
       render(false);
-      app.querySelector('[data-action="question-next"]')?.focus();
+      app.querySelector('[data-action="question-next"]')?.focus({preventScroll:true});
       announces(receipt.feedback.title);
       flushNotices();
     });
@@ -574,7 +574,7 @@ function answer(index) {
   if (session.index+1===session.questions.length) commitResult();
   save();
   render(false);
-  app.querySelector('[data-action="question-next"]')?.focus();
+  app.querySelector('[data-action="question-next"]')?.focus({preventScroll:true});
   announces(session.feedback.title);
   flushNotices();
 }
@@ -1036,6 +1036,7 @@ function render(focus = false, scroll = null) {
   const showBack=!span&&page!=='category'&&!roots.some(([id])=>id===page);
   const wide=['home','collection','category','story','ratings','line','shop'].includes(page);
   app.classList.toggle('has-nav',hasNav);
+  app.classList.toggle('quiz-page',isPartyPage(page));
   const reading=['intro','intro-replay','chapter'].includes(page);
   app.innerHTML=`${top}<main id="main" tabindex="-1" class="frame"><div class="layout${wide?'':' narrow'}${reading?' reading-layout':''}">
      ${showBack?button('Назад','back',{style:'back',icon:'left'}):''}${(pages[page]||home)()}</div></main>${nav}`;
@@ -1043,6 +1044,9 @@ function render(focus = false, scroll = null) {
     announces('');
     app.querySelector('#main').focus({preventScroll:true});
     pageScroller.scrollTo(0,scroll ?? 0);
+    if (isPartyPage(page) && !scroll && document.body.dataset.vkLayout === 'desktop') {
+      window.vkBridge?.send('VKWebAppScroll', {top:0,speed:0}).catch(() => {});
+    }
   }
 }
 function openRoot(id, params = {}) {
