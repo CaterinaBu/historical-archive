@@ -10,6 +10,7 @@ const modal = document.querySelector('#modal');
 const live = document.querySelector('#announcements');
 const databaseProgress = document.body.dataset.progress === 'database';
 const vkLaunch = document.body.dataset.platform === 'vk';
+const pageScroller = vkLaunch ? app : window;
 const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'lastNormalResult']);
 const sound = createArchiveAudio(DATA.audio);
 const icons = {
@@ -174,7 +175,7 @@ function restore(next, stack, scroll = 0) {
   if (leavingParty) flushNotices();
 }
 function go(page, params = {}) {
-  route.scroll = window.scrollY;
+  route.scroll = vkLaunch ? app.scrollTop : window.scrollY;
   setRoute({page,...params});
 }
 function nextLocal(patch, focusAction = '') {
@@ -1041,13 +1042,13 @@ function render(focus = false, scroll = null) {
   if (focus) {
     announces('');
     app.querySelector('#main').focus({preventScroll:true});
-    window.scrollTo(0,scroll ?? 0);
+    pageScroller.scrollTo(0,scroll ?? 0);
   }
 }
 function openRoot(id, params = {}) {
   if (route.page===id) {
     if (Object.keys(params).length) nextLocal(params,'rating-tab');
-    window.scrollTo(0,0);
+    pageScroller.scrollTo(0,0);
     return;
   }
   const find={ratings:'23',shop:'24',story:'25'}[id];
@@ -1146,7 +1147,7 @@ const actions = {
   'chapter-preview-done':()=>{markChapterRead(state.pendingChapters[0]);closeDialog();},
   'read-prologue':()=>go('intro-replay',{step:0,response:null}),
   finale:()=>go('chapter',{id:'finale',card:0}),
-  'chapter-step':id=>{nextLocal({card:Number(id)});window.scrollTo(0,0);app.querySelector('#main').focus();},
+  'chapter-step':id=>{nextLocal({card:Number(id)});pageScroller.scrollTo(0,0);app.querySelector('#main').focus({preventScroll:true});},
   'chapter-end':finishChapter,
   'chapter-next':advanceChapter,
   'rating-tab':id=>nextLocal({tab:id},'rating-tab'),

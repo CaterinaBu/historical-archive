@@ -17,6 +17,9 @@ function showStatus(message) {
 
 const databaseProgress = document.body.dataset.progress === 'database';
 const vkLaunch = document.body.dataset.platform === 'vk';
+if (vkLaunch && /^desktop_/.test(new URLSearchParams(location.search).get('vk_platform') ?? '')) {
+  document.body.dataset.vkLayout = 'desktop';
+}
 const storageKey = databaseProgress ? 'historical-archive-database-settings-v1' : 'historical-archive-progress-v1';
 
 function onStorageError(error) {

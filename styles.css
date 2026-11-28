@@ -129,6 +129,7 @@ main:focus{outline:none}
 .nav-button[aria-current=page]{background:#e9ecde;color:#214637}
 .nav-button:hover{background:#eae3d1}
 #app{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;min-width:0}
+body[data-platform=vk] #app{height:100vh;height:100dvh;min-height:0;overflow-y:auto;overscroll-behavior-y:contain}
 #app>main{flex:1 0 auto}
 #app.has-nav>main{padding-bottom:calc(83px + env(safe-area-inset-bottom,0px))}
 .footer{margin-top:20px;border-top:1px solid var(--line);padding-top:8px}
@@ -267,6 +268,13 @@ dialog::backdrop{background:#202a23a8}
   main,#app.has-nav>main{padding-block:27px 32px}
   .person-grid,.chapter-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
   .check-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:15px}
+}
+@media(max-width:919px){
+  body[data-vk-layout=desktop] .top-inner{flex-wrap:wrap}
+  body[data-vk-layout=desktop] .top-nav{display:flex;order:1;flex:1 0 100%;flex-wrap:wrap;gap:2px;padding-bottom:4px}
+  body[data-vk-layout=desktop] .top-nav .nav-button{flex:1 1 auto;flex-direction:row;gap:5px;min-height:40px;padding:4px 6px;white-space:nowrap}
+  body[data-vk-layout=desktop] .nav-wrap{display:none}
+  body[data-vk-layout=desktop] #app.has-nav>main{padding-bottom:31px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important}}
 .nav-wrap{padding-inline:env(safe-area-inset-left,0px) env(safe-area-inset-right,0px)}
