@@ -49,7 +49,7 @@ async function readJson(request) {
 
 async function readAnswer(request) {
   const { position, choice } = (await readJson(request)) ?? {};
-  if (!Number.isInteger(position) || position < 0 || position >= 10 || !Number.isInteger(choice) || choice < 0 || choice >= 4) {
+  if (!Number.isSafeInteger(position) || position < 0 || !Number.isInteger(choice) || choice < 0 || choice >= 4) {
     throw new RequestError(400, 'Номер вопроса или ответа вне диапазона.');
   }
   return { position, choice };
@@ -80,7 +80,18 @@ async function readProfile(request) {
   return { finds: Object.fromEntries(finds.map(id => [id, true])), audio, initialAudio };
 }
 
-async function handleApi(request, response, path, quiz, vk) {
+async function readDisplay(request) {
+  const { name, photo } = (await readJson(request)) ?? {};
+  const displayName = typeof name === 'string' && name.trim().replace(/\s+/g, ' ');
+  if (!displayName || displayName.length > 100) throw new RequestError(400, 'Неверное имя в профиле.');
+  const url = typeof photo === 'string' && URL.canParse(photo) ? new URL(photo) : null;
+  const displayPhoto = url?.protocol === 'https:' && !url.username && !url.password &&
+    /(^|\.)(userapi\.com|vkuserphoto\.ru|vk\.com|vk\.ru)$/i.test(url.hostname) ? url.href : null;
+  return { name: displayName, photo: displayPhoto };
+}
+
+async function handleApi(request, response, url, quiz, vk) {
+  const path = url.pathname;
   const loadProgress = request.method === 'GET' && path === '/api/progress';
   let player;
   if (vk) {
@@ -99,15 +110,26 @@ async function handleApi(request, response, path, quiz, vk) {
     response.setHeader('Set-Cookie', `${cookieName}=${id}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`);
     return json(response, 200, await quiz.progress(id));
   }
-  if (request.method === 'PATCH' && path === '/api/profile') {
-    if (!player) throw new RequestError(401, 'Откройте игру, чтобы начать тестовую сессию.');
-    return json(response, 200, await quiz.updateProfile(player, await readProfile(request)));
+  if (!player) throw new RequestError(401, 'Откройте игру, чтобы начать тестовую сессию.');
+  if (request.method === 'PATCH' && path === '/api/profile') return json(response, 200, await quiz.updateProfile(player, await readProfile(request)));
+  if (request.method === 'PATCH' && path === '/api/display') return json(response, 200, await quiz.setDisplay(player, await readDisplay(request)));
+  if (request.method === 'GET' && path === '/api/rankings') return json(response, 200, await quiz.rankings(player));
+  if (request.method === 'POST' && path === '/api/day-entry') return json(response, 200, await quiz.dayEntry(player));
+  if (request.method === 'POST' && path === '/api/day-notice') {
+    const { kind, day } = (await readJson(request)) ?? {};
+    if (!['salary', 'yesterday'].includes(kind) || !Number.isInteger(day) || day < 0 || day > 100000) {
+      throw new RequestError(400, 'Неверная дата уведомления.');
+    }
+    return json(response, 200, await quiz.acknowledge(player, kind, day));
   }
   const round = path.match(roundRoute);
   if (!round) throw new RequestError(404, 'Адрес не найден.');
-  if (!player) throw new RequestError(401, 'Откройте игру, чтобы начать тестовую сессию.');
   const [, id, answer] = round;
-  if (request.method === 'PUT' && !answer) return json(response, 200, await quiz.start(player, id));
+  if (request.method === 'PUT' && !answer) {
+    const mode = url.searchParams.get('mode') ?? 'normal';
+    if (!['normal', 'day'].includes(mode)) throw new RequestError(400, 'Неизвестный тип викторины.');
+    return json(response, 200, await quiz.start(player, id, mode));
+  }
   if (request.method === 'POST' && answer) {
     const { position, choice } = await readAnswer(request);
     return json(response, 200, await quiz.answer(player, id, position, choice));
@@ -157,9 +179,9 @@ export async function createArchiveServer(database, now = () => new Date(), vkCo
       if (!/^(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(host) && host.toLowerCase() !== tunnelHost?.toLowerCase()) {
         throw new RequestError(403, 'Локальный сервер доступен только с этого компьютера.');
       }
-      const { pathname } = new URL(request.url, 'http://localhost');
-      if (pathname.startsWith('/api/')) await handleApi(request, response, pathname, quiz, vk);
-      else await serveBrowser(request, response, pathname, index, vkBridge);
+      const url = new URL(request.url, 'http://localhost');
+      if (url.pathname.startsWith('/api/')) await handleApi(request, response, url, quiz, vk);
+      else await serveBrowser(request, response, url.pathname, index, vkBridge);
     } catch (error) {
       if (response.headersSent || response.destroyed) return;
       if (error instanceof RequestError) json(response, error.status, { error: error.message });

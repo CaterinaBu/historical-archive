@@ -193,3 +193,105 @@ test('VK launch data identifies an account across sessions and rejects a differe
     await database.close();
   }
 });
+
+test('daily game survives Moscow midnight and credits each account and day once', async () => {
+  const database = await openDatabase({ directory: 'memory://' });
+  let date = new Date('2026-11-27T20:59:00Z');
+  const appId = '11000001';
+  const secret = 'daily-test-key';
+  let server;
+  const launchFor = (user, ref = 'desktop') => {
+    const canonical = `vk_app_id=${appId}&vk_ref=${ref}&vk_ts=${Math.floor(+date / 1000)}&vk_user_id=${user}`;
+    return { authorization: `Bearer ${canonical}&sign=${createHmac('sha256',secret).update(canonical).digest('base64url')}` };
+  };
+  const request = async (user, path, method = 'GET', body, ref) =>
+    (await api(server,path,{...launchFor(user,ref),method,body})).payload;
+  const enter = (user, ref) => request(user,'day-entry','POST',undefined,ref);
+  const start = user => request(user,`quiz/${randomUUID()}?mode=day`,'PUT');
+  const answer = (user, id, position, choice) => request(user,`quiz/${id}/answer`,'POST',{position,choice});
+  const finish = async (user, id, count, startAt = 0) => {
+    const questions = await questionsFromDatabase(database,id);
+    let receipt;
+    for (const [index, question] of questions.entries()) {
+      if (index < startAt) continue;
+      receipt = await answer(user,id,index,(question.right + (index < count ? 0 : 1)) % 4);
+    }
+    return receipt;
+  };
+  try {
+    server = await launch(database,() => date,{appId,secret});
+    await Promise.all(['1001','1002','1003'].map(user => request(user,'progress')));
+    await request('1001','display','PATCH',{name:'Анна Тестова',photo:'https://sun9-1.userapi.com/test.jpg'});
+    await request('1002','display','PATCH',{name:'Борис Тестов'});
+    assert.equal((await enter('1001')).earned,0);
+    const first = await start('1001');
+    const second = await start('1002');
+    const third = await start('1003');
+    assert.equal(first.person,second.person);
+    assert.equal(first.person,third.person);
+    assert.ok(first.questions.length >= 2);
+
+    const priorWinner = await finish('1002',second.id,1);
+    assert.equal(priorWinner.progress.earned,60);
+    assert.equal(priorWinner.progress.finds['19'],true);
+    assert.equal(priorWinner.progress.finds['27'],true);
+    assert.deepEqual((await start('1002')).result,priorWinner.result);
+    const tied = await finish('1003',third.id,1);
+    assert.equal(tied.progress.daily,1);
+    const { rows:[firstRound] } = await database.query('SELECT questions FROM archive_quiz_rounds WHERE id = $1',[first.id]);
+    await answer('1001',first.id,0,firstRound.questions[0].right);
+
+    date = new Date('2026-11-27T21:01:00Z');
+    const newDay = await request('1001','progress');
+    assert.equal(newDay.calendarDay,first.day + 1);
+    assert.notEqual(newDay.dailyPerson,first.person);
+    assert.equal(newDay.daily,0);
+    assert.equal(newDay.yesterdayResult,null);
+    const yesterday = await request('1001','rankings');
+    assert.deepEqual(yesterday.yesterday.map(row => [row.place,row.score]),[[1,1],[1,1]]);
+    await request('1002','display','PATCH',{name:'Борис Новое Имя'});
+    assert.deepEqual((await request('1001','rankings')).yesterday,yesterday.yesterday);
+    assert.deepEqual((await request('1002','progress')).yesterdayResult,{place:1,score:1});
+
+    const result = await finish('1001',first.id,1,1);
+    assert.equal(result.result.day,first.day);
+    assert.equal(result.result.bonus,50);
+    assert.equal(result.progress.daily,1);
+    assert.equal(result.progress.earned,60);
+    const lastIndex = firstRound.questions.length - 1;
+    const lastChoice = (firstRound.questions[lastIndex].right + 1) % 4;
+    const receipt = await answer('1001',first.id,lastIndex,lastChoice);
+    assert.equal(receipt.progress.earned,60);
+    assert.deepEqual((await request('1001','rankings')).yesterday,yesterday.yesterday);
+
+    const [desktop,mobile] = await Promise.all([enter('1001'),enter('1001','mobile')]);
+    assert.equal(desktop.earned,90);
+    assert.equal(mobile.earned,90);
+    assert.equal(desktop.salaryPending,true);
+    assert.ok(desktop.salaryJoke);
+    assert.equal(desktop.salaryJoke,mobile.salaryJoke);
+    assert.equal(desktop.finds['18'],true);
+    await request('1001','day-notice','POST',{kind:'salary',day:newDay.calendarDay},'mobile');
+    assert.equal((await request('1001','progress')).salaryPending,false);
+
+    const newTask = await start('1001');
+    assert.equal(newTask.day,first.day + 1);
+    assert.equal(newTask.person,newDay.dailyPerson);
+    assert.equal(newTask.progress.dailyResult,null);
+    const allWrong = await finish('1001',newTask.id,0);
+    assert.equal(allWrong.progress.earned,140);
+    assert.deepEqual((await request('1001','progress','GET',undefined,'mobile')).dailyResult,allWrong.result);
+    await request('1002','day-notice','POST',{kind:'yesterday',day:first.day});
+    assert.equal((await request('1002','progress')).yesterdayResult,null);
+    assert.deepEqual((await request('1001','rankings')).yesterday,yesterday.yesterday);
+
+    date = new Date('2026-12-05T21:01:00Z');
+    const afterAbsence = await enter('1001');
+    assert.equal(afterAbsence.earned,170);
+    assert.equal(afterAbsence.finds['26'],true);
+    assert.notEqual(afterAbsence.salaryJoke,desktop.salaryJoke);
+  } finally {
+    await server?.close();
+    await database.close();
+  }
+});

@@ -1,7 +1,7 @@
 import { loadArchiveContent } from './content/load.js';
 import { createArchiveAudio } from './audio.js';
-import { displayField, dailyValuePools, dailyQuestionRecords } from './daily.js';
-import { createQuizBank, sample } from './questions.js';
+import { displayField } from './daily.js';
+import { createDailyQuiz, createQuizBank, sample } from './questions.js';
 import { quizProgress } from './progress-api.js';
 import { audioDefaults, balanceFinds, collectionFinds, localFindIds } from './content/profile-rules.js';
 
@@ -12,7 +12,7 @@ const live = document.querySelector('#announcements');
 const databaseProgress = document.body.dataset.progress === 'database';
 const vkLaunch = document.body.dataset.platform === 'vk';
 const pageScroller = vkLaunch ? app : window;
-const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'lastNormalResult']);
+const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'dayResults', 'lastNormalResult']);
 const sound = createArchiveAudio(DATA.audio);
 const icons = {
   archive:'<path d="M4 6h16v4H4zM6 10v9h12v-9M10 14h4M9 6l2-2h6l2 2"/>',
@@ -56,17 +56,8 @@ const note = (title, body, style = 'note') => `<div class="${style} stack compac
 const tutorialQuestion = DATA.story.prologue.tutorial.questionContent;
 const tutorialStep = DATA.story.prologue.cards.length - 1;
 const quizBank = createQuizBank(DATA);
-const dailyPools = dailyValuePools(DATA);
-const dailyPeople=Object.keys(DATA.people);
-const dailyPerson=()=>dailyPeople[state.calendarDay%dailyPeople.length];
-function dailyQuestions(person) {
-  return dailyQuestionRecords(DATA,person,dailyPools,quizBank.factValues).map(({text,answer,primary,fallback,fact})=>{
-    const alternatives=sample(primary,3);
-    alternatives.push(...sample(fallback,3-alternatives.length));
-    const options=sample([answer,...alternatives],4);
-    return {text,options,right:options.indexOf(answer),person,fact};
-  });
-}
+const dailyQuiz = createDailyQuiz(DATA,quizBank.factValues);
+const dailyPerson=()=>databaseProgress?serverDay.person:dailyQuiz.person(state.calendarDay);
 const hintInfo = {
   exclude:{name:'Метод исключения', desc:'Уберёт один неверный вариант.', before:50, now:75},
   retry:{name:'Право на ошибку', desc:'Даёт вторую попытку. Расходуется даже при верном первом ответе.', before:70, now:105},
@@ -112,6 +103,31 @@ let accountWriting = false;
 let accountReading = false;
 let accountRetry;
 let audioRevision = 0;
+let progressRevision = 0;
+let serverDay = {};
+let entryPending = false;
+let activeDayNotice;
+const closedDayNotices = new Map();
+let standings;
+let standingsLoading = false;
+let standingsError = false;
+let observedServerDay = moscowDay();
+
+async function syncRankingName(progress) {
+  if (!vkLaunch || !window.vkBridge) return;
+  try {
+    const profile = await window.vkBridge.send('VKWebAppGetUserInfo');
+    const userId = new URLSearchParams(location.search).get('vk_user_id');
+    if (String(profile?.id) !== userId) return;
+    const name = [profile.first_name,profile.last_name].filter(Boolean).join(' ');
+    const photo = profile.photo_100 || null;
+    if (!name || (name === progress.displayName && photo === progress.displayPhoto)) return;
+    await quizProgress.setDisplay({name,photo});
+    if (route.page === 'ratings') void loadRankings();
+  } catch (error) {
+    console.error(error);
+  }
+}
 
 function failStorage(error) {
   storageFailed = true;
@@ -190,12 +206,21 @@ async function refreshAccount() {
   if (!databaseProgress || !storageKey || accountReading || accountWriting || storageFailed) return;
   accountReading = true;
   const revision = audioRevision;
+  const receivedProgress = progressRevision;
   try {
     const progress = await quizProgress.load();
     const previous = count(state.finds);
     applyAccountFinds(progress.finds);
     if (revision === audioRevision && !accountWriting && !accountChanges.initialAudio) applyAccountAudio(progress.audioSettings);
-    if (route.page === 'collection' && route.tab === 'finds' && count(state.finds) !== previous) render(false);
+    if (receivedProgress === progressRevision && !quizRequestPending && !isPartyPage(route.page)) {
+      const dayChanged = state.calendarDay !== progress.calendarDay;
+      const scoreChanged = state.earned !== progress.earned || state.reputation !== progress.reputation ||
+        Boolean(todayResult()) !== Boolean(progress.dailyResult);
+      applyDatabaseProgress(progress);
+      if (dayChanged || scoreChanged || (route.page === 'collection' && route.tab === 'finds' && count(state.finds) !== previous)) render(false);
+      if (route.page === 'ratings') void loadRankings();
+      flushNotices();
+    }
     save();
   } catch (error) {
     console.error(error);
@@ -205,9 +230,13 @@ async function refreshAccount() {
 }
 
 function applyDatabaseProgress(progress, notifyFinds = false) {
+  progressRevision++;
   const { facts, discovered, earned, reputation, daily, yesterday, lastNormalResult, calendarDay } = progress;
   Object.assign(state, { facts, discovered, earned, paid:0, reputation, daily, lastNormalResult, calendarDay,
     dailyYesterday:{score:yesterday} });
+  serverDay = { person:progress.dailyPerson, first:progress.firstDay, entered:progress.enteredToday,
+    salary:progress.salaryJoke, salaryPending:progress.salaryPending, yesterday:progress.yesterdayResult };
+  if (progress.dailyResult) state.dayResults[calendarDay] = progress.dailyResult;
   state.finaleAvailable=count(state.facts)===count(DATA.facts);
   applyAccountFinds(progress.finds,notifyFinds);
 }
@@ -301,6 +330,7 @@ window.addEventListener('popstate', ({state: locationState}) => {
   }
   scrollForPop = navigation.at(-1)?.page===next.page ? navigation.at(-1).scroll || 0 : next.scroll || 0;
   restore(next,stack,scrollForPop);
+  if (next.page==='ratings') void loadRankings();
   if (state.pendingChapters.length) flushNotices();
 });
 function showDialog(key,title,body) {
@@ -321,6 +351,12 @@ function closeDialog(processQueue = true) {
   }
   modalKey=null;
   modal.close();
+  if (activeDayNotice) {
+    const notice = activeDayNotice;
+    activeDayNotice = null;
+    closedDayNotices.set(notice.kind,notice.day);
+    void quizProgress.acknowledge(notice).catch(console.error);
+  }
   if (modalPrevious && document.contains(modalPrevious)) modalPrevious.focus({preventScroll:true});
   if (processQueue) flushNotices();
 }
@@ -342,10 +378,49 @@ function findDialogContent(id) {
   const item=DATA.finds[id];
   return `${photo(id,'find-art')}<p>${label(item.description)}</p>${note('За что выдана',item.rule)}`;
 }
+async function enterServerDay() {
+  if (entryPending) return;
+  entryPending = true;
+  const revision = progressRevision;
+  try {
+    const progress = await quizProgress.dayEntry();
+    if (revision === progressRevision) applyDatabaseProgress(progress,true);
+    if (!serverDay.entered || isPartyPage(route.page)) return;
+    render(false);
+    flushNotices();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    entryPending = false;
+  }
+}
+function showServerDayNotice() {
+  if (!state.started) return false;
+  if (!serverDay.entered) {
+    void enterServerDay();
+    return false;
+  }
+  const day = state.calendarDay;
+  if (serverDay.salaryPending && closedDayNotices.get('salary') !== day) {
+    activeDayNotice = {kind:'salary',day};
+    sound.play('event');
+    salaryDialog(true);
+    return true;
+  }
+  if (serverDay.yesterday && closedDayNotices.get('yesterday') !== day - 1) {
+    const {score,place} = serverDay.yesterday;
+    activeDayNotice = {kind:'yesterday',day:day - 1};
+    const text = route.page==='home'?'К рабочему столу':'Продолжить';
+    showDialog('yesterday','Вчерашний итог',note('Ваш результат',`Место — ${number(place)}. Очки — ${number(score)}.`)+button(text,'dismiss'));
+    return true;
+  }
+  return false;
+}
 function flushNotices() {
   if (modal.open || (route.page==='question' && session?.finished)) return;
   const showDayEntry=!isPartyPage(route.page);
-  if (showDayEntry) firstDailyEntry();
+  if (showDayEntry && databaseProgress && showServerDayNotice()) return;
+  if (showDayEntry && !databaseProgress) firstDailyEntry();
   if (route.page!=='question'&&state.pendingChapters.length) {
     chapterNotice(state.pendingChapters[0]);
     return;
@@ -404,14 +479,15 @@ function chooseSalaryJoke() {
 }
 function salaryDialog(paidToday) {
   const message = paidToday ? 'Бухгалтерия начислила 30 скрепок.' : 'Вы ещё не приступили к полноценной работе, а уже интересуетесь зарплатой? Нам нравится ваш подход. Приходите завтра.';
-  let joke=paidToday?DATA.salaryJokes.find(item=>item.id===state.salaryJoke):null;
-  if (paidToday&&!joke) {
+  let joke=paidToday?DATA.salaryJokes.find(item=>item.id===(databaseProgress?serverDay.salary:state.salaryJoke)):null;
+  if (paidToday&&!joke&&!databaseProgress) {
     joke=chooseSalaryJoke();
     save();
   }
   showDialog('salary','Ежедневная зарплата',`<p>${label(message)}</p>
   ${joke?`<figure class="salary-quote note stack compact"><blockquote><p>${label(joke.text)}</p></blockquote><figcaption class="small subtle">Бухгалтерия</figcaption></figure>`:''}
-  ${button('Понятно','dismiss')}${paidToday?'<small class="secret">Пароль: КАРТОТЕКА</small>':''}`);
+  ${button(activeDayNotice?.kind==='salary'&&route.page!=='home'?'Продолжить':'Понятно','dismiss')}
+  ${paidToday?'<small class="secret">Пароль: КАРТОТЕКА</small>':''}`);
 }
 function firstDailyEntry() {
   if (databaseProgress || !state.started || state.dayNumber===1 || state.lastSalary===state.dayNumber) return;
@@ -449,7 +525,8 @@ function syncMoscowDay(deferNotices = false) {
     changeDay(elapsed,{deferNotices});
   }
 }
-const todayResult=()=>state.dayResults[state.dayNumber];
+const activeDay=()=>databaseProgress?state.calendarDay:state.dayNumber;
+const todayResult=()=>state.dayResults[activeDay()];
 function modeCard(title,desc,action,id,glyph) {
   return `<button class="mode" type="button" data-action="${action}" data-id="${id}"><span class="tile-icon">${icon(glyph)}</span><span class="tile-body"><strong>${label(title)}</strong><span class="small subtle">${label(desc)}</span></span>${icon('right',true)}</button>`;
 }
@@ -467,9 +544,9 @@ function home() {
     </div>
     <div class="stack">
       <h2>Сегодня в архиве</h2>
-      ${databaseProgress ? note('Тест сохранений', 'В этой сборке доступна обычная викторина. Открытые факты, заработанные скрепки и очки сохраняются в базе.') :
-        modeCard('Игра дня',todayResult()?'Готово. Открыть итог':'Одна личность. Одно дело в день','daily','', 'calendar')+
-        modeCard('Ежедневная зарплата',state.dayNumber===1?'Со второго календарного дня':state.lastSalary===state.dayNumber?'Сегодня начислена':'К выдаче','salary','', 'clip')}
+      ${modeCard('Игра дня',todayResult()?'Готово. Открыть итог':'Одна личность. Одно дело в день','daily','', 'calendar')}
+      ${modeCard('Ежедневная зарплата',(databaseProgress?serverDay.first:state.dayNumber===1)?'Со второго календарного дня':
+        (databaseProgress?serverDay.salary:state.lastSalary===state.dayNumber)?'Сегодня начислена':'К выдаче','salary','', 'clip')}
       <div class="surface stack compact">
         <h3>Восстановление архива</h3>
         <div class="ratio"><strong>${number(count(state.facts))}</strong> из ${number(count(DATA.facts))} фактов</div>
@@ -530,19 +607,24 @@ function start(mode) {
     if (route.page!=='intro') go('intro');
     return;
   }
-  if (mode==='day' && todayResult()) {go('result',{mode:'day',day:state.dayNumber});return;}
+  if (!databaseProgress && mode==='day' && todayResult()) {go('result',{mode:'day',day:activeDay()});return;}
   if (databaseProgress) {
     const id = crypto.randomUUID();
-    performQuizRequest(() => quizProgress.start(id), round => {
+    performQuizRequest(() => quizProgress.start(id,mode), round => {
       applyDatabaseProgress(round.progress);
       Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
-      session={id:round.id,mode:'normal',day:round.progress.calendarDay,questions:round.questions,index:0,
+      if (round.result) {
+        state.dayResults[round.result.day]=round.result;
+        go('result',{mode:'day',day:round.result.day});
+        return;
+      }
+      session={id:round.id,mode:round.mode,day:round.day,person:round.person,questions:round.questions,index:0,
         attempted:null,wrong:null,feedback:null,hints:{},removed:null};
       go('question');
     });
     return;
   }
-  session={mode,day:state.dayNumber,questions:mode==='day'?dailyQuestions(dailyPerson()):quizBank.start(state.facts),index:0,correct:0,newPeople:0,newFacts:0,
+  session={mode,day:activeDay(),questions:mode==='day'?dailyQuiz.questions(dailyPerson()):quizBank.start(state.facts),index:0,correct:0,newPeople:0,newFacts:0,
     attempted:null,wrong:null,feedback:null,hints:{},removed:null, retryUsed:false};
   go('question');
 }
@@ -571,7 +653,7 @@ function question() {
   const q=currentQuestion();
   const final=session.feedback!==null;
   const day=session.mode==='day';
-  const name = day ? DATA.people[q.person].name : '';
+  const name = day ? DATA.people[session.person ?? q.person].name : '';
   return `<div class="stack">
     <div class="stack compact">
       <div class="inline spread"><span class="kicker">${day?'Игра дня':'Викторина'}</span><span class="ratio">Вопрос ${session.index+1} из ${session.questions.length}</span></div>
@@ -604,6 +686,7 @@ function answer(index) {
       session.attempted=index;
       session.feedback=receipt.feedback;
       session.finished=Boolean(receipt.result);
+      if (receipt.result?.mode==='day') state.dayResults[receipt.result.day]=receipt.result;
       q.right=receipt.right;
       sound.play(receipt.feedback.correct?'correct':'incorrect');
       checkProgress(receipt.person);
@@ -693,16 +776,23 @@ function exitParty() {
   if (!databaseProgress) {leave();return;}
   performQuizRequest(() => quizProgress.abandon(session.id), result => {
     applyDatabaseProgress(result.progress);
-    if (result.finished) revealResult();
+    if (result.finished) {
+      if (result.result?.mode==='day') state.dayResults[result.result.day]=result.result;
+      revealResult();
+    }
     else leave();
   });
 }
 function daily() {
   syncMoscowDay(true);
   if (!state.started) {start('day');return;}
-  if (todayResult()) {go('result',{mode:'day',day:state.dayNumber});return;}
-  go('daily');
-  flushNotices();
+  const open = () => {
+    if (todayResult()) {go('result',{mode:'day',day:activeDay()});return;}
+    go('daily');
+    flushNotices();
+  };
+  if (!databaseProgress) {open();return;}
+  return performQuizRequest(quizProgress.load,progress => {applyDatabaseProgress(progress);open();});
 }
 function dayIntro() {
   const person=DATA.people[dailyPerson()];
@@ -710,11 +800,11 @@ function dayIntro() {
   <div class="surface stack"><h2>${label(person.name)}</h2><p>${person.facts.length} ${({one:'вопрос',few:'вопроса',many:'вопросов'})[paperclipCount.select(person.facts.length)]} · 50 скрепок за завершение</p>
     ${button('Открыть дело','start',{id:'day',icon:'arrow'})}</div></div>`;
 }
-const getResult = (location = route) => location.mode==='day'?state.dayResults[location.day??state.dayNumber]:state.lastNormalResult;
+const getResult = (location = route) => location.mode==='day'?state.dayResults[location.day??activeDay()]:state.lastNormalResult;
 function results() {
   const r=getResult();
   if (!r) return note('Пока нет результата','Начните партию на рабочем столе.')+button('К рабочему столу','home');
-  const nextDay = r.mode==='day' && route.day!=null && route.day < state.dayNumber;
+  const nextDay = r.mode==='day' && route.day!=null && route.day < activeDay();
   const subtitle = r.mode==='day'?(nextDay?'Вчерашнее задание выполнено. Новая игра дня уже открыта.':'Задание выполнено. Следующее откроется в 00:00 МСК.'):'Скрепки и очки начислены.';
   return `<div class="stack">${heading(r.mode==='day'?'Итог Игры дня':'Итог партии',subtitle)}
    <div class="surface stack"><div class="stats">
@@ -944,10 +1034,41 @@ function personalScore(score) {
   return `<div class="inline spread"><strong>Ваши очки</strong><span>${number(score)}</span></div>`;
 }
 
+async function loadRankings() {
+  if (!databaseProgress || standingsLoading) return;
+  standingsLoading = true;
+  standingsError = false;
+  try {
+    standings = await quizProgress.rankings();
+  } catch (error) {
+    standingsError = true;
+    console.error(error);
+  } finally {
+    standingsLoading = false;
+    if (route.page === 'ratings') render(false);
+  }
+}
+
+function rankList(rows) {
+  if (!rows.length) return '<p class="small subtle">Результатов пока нет.</p>';
+  return `<div class="stack compact" role="list">${rows.map(({place,score,name,photo,isSelf}) =>
+    `<div class="rank-row${isSelf?' current':''}" role="listitem"><span>${number(place)}</span>
+      <span class="rank-avatar">${photo?`<img src="${e(photo)}" alt="" referrerpolicy="no-referrer">`:icon('archive',true)}</span>
+      <strong>${label(name ?? (isSelf?'Вы':'Архивист'))}${isSelf&&name?' <span class="small subtle">(вы)</span>':''}</strong><span>${number(score)}</span></div>`).join('')}</div>`;
+}
+
 function ratings() {
   const current=route.tab || 'reputation';
   const controls=tabs([['reputation','Репутация'],['day','Настрой дня']],current,'rating-tab','Рейтинг');
-  return `<div class="stack">${sectionHeading('Рейтинги',controls,databaseProgress?'Здесь показаны ваши очки из тестовой базы.':'Здесь показаны очки из этого браузера. Общие рейтинги появятся после подключения VK.')}
+  if (databaseProgress) return `<div class="stack">${sectionHeading('Рейтинги',controls)}
+    <p class="small subtle">${current==='reputation'?'Очки накапливаются без сброса.':'Суточный рейтинг обновляется в 00:00 МСК.'}</p>
+    ${standingsError?note('Не удалось загрузить рейтинг','')+button('Повторить','rankings-retry'):
+      !standings?'<p role="status">Загрузка рейтинга…</p>':
+      current==='reputation'?`<section class="surface">${rankList(standings.reputation)}</section>`:`<div class="daily-ranks">
+        <section class="surface stack compact"><h2>Сегодня</h2>${rankList(standings.today)}</section>
+        <section class="surface stack compact"><h2>Вчера</h2>${rankList(standings.yesterday)}</section>
+      </div>`}</div>`;
+  return `<div class="stack">${sectionHeading('Рейтинги',controls,'Здесь показаны очки из этого браузера. Общие рейтинги появятся после подключения VK.')}
    <p class="small subtle">${current==='reputation'?'Очки накапливаются без сброса.':'Суточный рейтинг обновляется в 00:00 МСК.'}</p>
    ${current==='reputation'?`<section class="surface">${personalScore(state.reputation)}</section>`:`<div class="daily-ranks">
      <section class="surface stack compact" aria-labelledby="today-title"><h2 id="today-title">Сегодня</h2>${personalScore(state.daily)}</section>
@@ -957,7 +1078,7 @@ function ratings() {
    </div>`;
 }
 function shop() {
-  if (databaseProgress) return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}${note('Магазин пока закрыт','В тестовой сборке можно заработать скрепки в обычной викторине.')}</div>`;
+  if (databaseProgress) return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}${note('Магазин пока закрыт','Скрепки можно заработать в викторинах и получить с зарплатой.')}</div>`;
   return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}
    ${listItem('Пополнить баланс','Пакеты скрепок за голоса VK','topup','','clip')}
    <section class="stack" aria-labelledby="shop-hints">
@@ -1124,6 +1245,7 @@ function render(focus = false, scroll = null) {
   }
 }
 function openRoot(id, params = {}) {
+  if (id==='ratings') void loadRankings();
   if (route.page===id) {
     if (Object.keys(params).length) nextLocal(params,'rating-tab');
     pageScroller.scrollTo(0,0);
@@ -1204,7 +1326,13 @@ const actions = {
   'intro-end':()=>{state.started=true;earnedFind('01');save();setRoute({page:'home'},true);
     if (redirectAfterTutorial==='day') {redirectAfterTutorial=null;daily();}
     flushNotices();},
-  start, daily, salary:()=>{if (state.started&&state.dayNumber>1&&state.lastSalary!==state.dayNumber) flushNotices();else salaryDialog(state.lastSalary===state.dayNumber);},
+  start, daily, salary:()=>{
+    if (databaseProgress) {
+      if (state.started && !serverDay.entered) {void enterServerDay();return;}
+      if (!showServerDayNotice()) salaryDialog(Boolean(serverDay.salary));
+    } else if (state.started&&state.dayNumber>1&&state.lastSalary!==state.dayNumber) flushNotices();
+    else salaryDialog(state.lastSalary===state.dayNumber);
+  },
   answer:id=>answer(Number(id)), 'question-next':endQuestion,
   exit:exitParty,
   'retry-quiz':()=>{closeDialog(false);retryQuizRequest?.();},
@@ -1239,6 +1367,7 @@ const actions = {
   'chapter-end':finishChapter,
   'chapter-next':advanceChapter,
   'rating-tab':id=>nextLocal({tab:id},'rating-tab'),
+  'rankings-retry':()=>{void loadRankings();},
   topup:packages, fund:()=>go('fund'), patrons:()=>go('patrons'),
   donate,
   'secret-button':()=>{
@@ -1293,6 +1422,7 @@ export async function startArchive(key, onStorageError) {
       applyDatabaseProgress(progress);
       applyAccountAudio(progress.audioSettings);
       if (state.finds['01'] || (vkLaunch && count(state.discovered))) state.started = true;
+      void syncRankingName(progress);
     }
     Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
     save();
@@ -1306,5 +1436,13 @@ export async function startArchive(key, onStorageError) {
   syncMoscowDay();
   flushNotices();
   if (!databaseProgress) window.setInterval(syncMoscowDay, 15000);
+  else window.setInterval(() => {
+    const calendarDay = moscowDay();
+    if (document.hidden || quizRequestPending || isPartyPage(route.page)) return;
+    if (observedServerDay === calendarDay && (!state.started || serverDay.entered || entryPending)) return;
+    void refreshAccount().finally(() => {
+      if (state.calendarDay === calendarDay) observedServerDay = calendarDay;
+    });
+  },15000);
   return true;
 }

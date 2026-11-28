@@ -185,6 +185,8 @@ body[data-platform=vk] #app.quiz-page{overscroll-behavior-y:auto}
 .rank-list{padding:0;list-style:none;display:grid;gap:7px}
 .rank-row{display:grid;grid-template-columns:32px 30px minmax(0,1fr) auto;gap:9px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:11px;background:var(--surface);min-height:50px;overflow-wrap:anywhere}
 .rank-row.current{background:#e6eddf;border-color:#bacab5}
+.rank-avatar{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;overflow:hidden;background:var(--paper)}
+.rank-avatar img{width:100%;height:100%;object-fit:cover}
 .initial{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:#e8deca;font-weight:700;font-size:.79rem}
 .field{display:grid;gap:6px;font-weight:650;min-width:0}
 .field input{width:100%;min-height:46px;border-radius:10px;border:1px solid #b5a88d;background:var(--surface);padding:9px 12px;color:var(--ink)}

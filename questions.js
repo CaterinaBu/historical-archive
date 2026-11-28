@@ -1,4 +1,4 @@
-import { displayField, normalize, filmDetails, filmExclusions, standardQuestionText } from './daily.js';
+import { dailyQuestionRecords, dailyValuePools, displayField, normalize, filmDetails, filmExclusions, standardQuestionText } from './daily.js';
 
 export function sample(items, limit, random = Math.random) {
   const copy = [...items];
@@ -7,6 +7,20 @@ export function sample(items, limit, random = Math.random) {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy.slice(0, limit);
+}
+
+export function createDailyQuiz(data, factValues) {
+  const people = Object.keys(data.people);
+  const pools = dailyValuePools(data);
+  return {
+    person: day => people[day % people.length],
+    questions: person => dailyQuestionRecords(data, person, pools, factValues).map(({text,answer,primary,fallback,fact}) => {
+      const alternatives = sample(primary, 3);
+      alternatives.push(...sample(fallback, 3 - alternatives.length));
+      const options = sample([answer, ...alternatives], 4);
+      return {text,options,right:options.indexOf(answer),person,fact};
+    }),
+  };
 }
 
 export function createQuizBank(data) {

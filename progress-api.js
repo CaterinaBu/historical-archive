@@ -21,7 +21,11 @@ async function request(path, method = 'GET', body, keepalive = false) {
 export const quizProgress = {
   load: () => request('progress'),
   saveProfile: profile => request('profile', 'PATCH', profile, true),
-  start: id => request(`quiz/${id}`, 'PUT'),
+  setDisplay: display => request('display', 'PATCH', display),
+  dayEntry: () => request('day-entry', 'POST'),
+  acknowledge: notice => request('day-notice', 'POST', notice, true),
+  rankings: () => request('rankings'),
+  start: (id, mode) => request(`quiz/${id}${mode === 'day' ? '?mode=day' : ''}`, 'PUT'),
   answer: (id, position, choice) => request(`quiz/${id}/answer`, 'POST', { position, choice }),
   abandon: id => request(`quiz/${id}`, 'DELETE'),
 };
