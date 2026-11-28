@@ -3,19 +3,14 @@ import { createDailyQuiz, createQuizBank, sample } from '../questions.js';
 import { displayField } from '../daily.js';
 import { audioDefaults, balanceFinds, collectionFinds } from '../content/profile-rules.js';
 import { addDailyScore, rankings, yesterdayResult } from './rankings.js';
+import { RequestError } from './request-error.js';
+import { applyShopOperation } from './shop.js';
 
 const moscowDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' });
 const dateFor = now => moscowDate.format(now());
 const asDayNumber = date => Date.parse(`${date}T00:00:00Z`) / 86400000;
 const dateString = day => new Date(day * 86400000).toISOString().slice(0, 10);
 const publicQuestion = ({ text, options }) => ({ text, options });
-
-export class RequestError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
 
 async function lockPlayer(connection, playerId, required = true) {
   const { rows: [player] } = await connection.query(
@@ -53,7 +48,7 @@ async function completedDaily(connection, playerId, date) {
 
 async function progress(connection, playerId, date, daily) {
   const { rows: [row] } = await connection.query(`
-    SELECT player.facts, player.discovered, player.earned, player.reputation, player.finds,
+    SELECT player.facts, player.discovered, player.earned, player.paid, player.inventory, player.donations, player.reputation, player.finds,
            player.audio_settings AS "audioSettings",
            player.last_normal_result AS "lastNormalResult",
            COALESCE(today.score, 0) AS daily, yesterday.score AS yesterday,
@@ -154,6 +149,13 @@ export function createQuiz(database, data, now = () => new Date()) {
       const date = dateFor(now);
       return database.transaction(connection => rankings(connection,playerId,date,dateString(asDayNumber(date)-1)));
     },
+    shop(playerId, id, command) {
+      return database.transaction(async connection => {
+        const player = await lockPlayer(connection,playerId);
+        const receipt = await applyShopOperation(connection,data,player,id,command);
+        return { ...receipt, progress:await readProgress(connection,playerId,dateFor(now)) };
+      });
+    },
     async updateProfile(playerId, { finds, audio, initialAudio }) {
       const { rows: [profile] } = await database.query(`UPDATE archive_players
         SET finds = finds || $2::jsonb,
@@ -219,9 +221,21 @@ export function createQuiz(database, data, now = () => new Date()) {
 
         const question = round.questions[position];
         const correct = choice === question.right;
-        const newPerson = !player.discovered[question.person];
+        const hints = round.used_hints[position] ?? {};
+        if (choice === hints.exclude?.removed) throw new RequestError(409, 'Этот вариант уже исключён.');
+        const retry = round.retry_attempts[position];
+        if (retry?.choice === choice) return { retryAttempt:true, progress:await readProgress(connection,playerId,date) };
+        const newPerson = retry ? retry.newPerson : !player.discovered[question.person];
         const newFact = correct && !player.facts[question.fact];
         player.discovered[question.person] = true;
+        if (hints.retry && !retry && !correct) {
+          round.retry_attempts[position] = { choice,newPerson };
+          await connection.query('UPDATE archive_quiz_rounds SET retry_attempts = $3::jsonb WHERE player_id = $1 AND id = $2',
+            [playerId,id,JSON.stringify(round.retry_attempts)]);
+          await connection.query(`UPDATE archive_players SET discovered = $2::jsonb, finds = finds || '{"01":true,"10":true}'::jsonb
+            WHERE id = $1`, [playerId,JSON.stringify(player.discovered)]);
+          return { retryAttempt:true, progress:await readProgress(connection,playerId,date) };
+        }
         if (newFact) player.facts[question.fact] = true;
         const fact = data.facts[question.fact];
         const receipt = {
@@ -257,6 +271,7 @@ export function createQuiz(database, data, now = () => new Date()) {
         const awards = ['01', ...collectionFinds(data, player, question.person),
           ...balanceFinds({ earned: player.earned + reward, reputation: player.reputation + score })];
         if (!correct) awards.push(isDay ? '27' : '10');
+        if (correct && hints.retry && !retry) awards.push('20');
         if (finished && isDay) awards.push('19');
         await connection.query(`UPDATE archive_players
              SET facts = $2::jsonb, discovered = $3::jsonb, earned = earned + $4, reputation = reputation + $5,

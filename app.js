@@ -4,6 +4,7 @@ import { displayField } from './daily.js';
 import { createDailyQuiz, createQuizBank, sample } from './questions.js';
 import { quizProgress } from './progress-api.js';
 import { audioDefaults, balanceFinds, collectionFinds, localFindIds } from './content/profile-rules.js';
+import { hintInfo, researchProducts } from './content/shop-rules.js';
 
 const DATA = await loadArchiveContent();
 const app = document.querySelector('#app');
@@ -12,7 +13,8 @@ const live = document.querySelector('#announcements');
 const databaseProgress = document.body.dataset.progress === 'database';
 const vkLaunch = document.body.dataset.platform === 'vk';
 const pageScroller = vkLaunch ? app : window;
-const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'reputation', 'daily', 'dailyYesterday', 'dayResults', 'lastNormalResult']);
+const databaseFields = new Set(['facts', 'discovered', 'earned', 'paid', 'inventory', 'donations',
+  'reputation', 'daily', 'dailyYesterday', 'dayResults', 'lastNormalResult']);
 const sound = createArchiveAudio(DATA.audio);
 const icons = {
   archive:'<path d="M4 6h16v4H4zM6 10v9h12v-9M10 14h4M9 6l2-2h6l2 2"/>',
@@ -58,11 +60,6 @@ const tutorialStep = DATA.story.prologue.cards.length - 1;
 const quizBank = createQuizBank(DATA);
 const dailyQuiz = createDailyQuiz(DATA,quizBank.factValues);
 const dailyPerson=()=>databaseProgress?serverDay.person:dailyQuiz.person(state.calendarDay);
-const hintInfo = {
-  exclude:{name:'Метод исключения', desc:'Уберёт один неверный вариант.', before:50, now:75},
-  retry:{name:'Право на ошибку', desc:'Даёт вторую попытку. Расходуется даже при верном первом ответе.', before:70, now:105},
-  expert:{name:'Мнение эксперта', desc:'Покажет верный вариант.', before:150, now:225},
-};
 const packs = [
   ['Мелочь из кармана',100,1,'Нашли в кармане служебного пиджака.'],
   ['Внеплановая премия',1000,8,'Бухгалтерия отрицает свою причастность.'],
@@ -73,10 +70,6 @@ const roots = [
   ['home','Рабочий стол','archive'], ['collection','Коллекция','cards'], ['story','Сюжет','story'],
   ['ratings','Рейтинги','trophy'], ['shop','Магазин','bag'], ['about','Об игре','info'],
 ];
-const researchProducts = {
-  fact:{name:'Справка из архива',price:500,hint:'Открывает один выбранный закрытый факт.'},
-  all:{name:'Комплексная экспертиза',price:3000,hint:'Открывает все оставшиеся факты этой личности. Выбирать факт не нужно.'},
-};
 const categoryLines = DATA.categoryLines;
 const storyProgress = Object.fromEntries(DATA.categories.map(category=>{
   const line=DATA.story.storylines.find(item=>item.id===categoryLines[category]);
@@ -216,9 +209,13 @@ async function refreshAccount() {
       const dayChanged = state.calendarDay !== progress.calendarDay;
       const scoreChanged = state.earned !== progress.earned || state.reputation !== progress.reputation ||
         Boolean(todayResult()) !== Boolean(progress.dailyResult);
+      const shopChanged = state.paid !== progress.paid || state.donations !== progress.donations ||
+        count(state.facts) !== count(progress.facts) || count(state.discovered) !== count(progress.discovered) ||
+        Object.keys(hintInfo).some(id => state.inventory[id] !== (progress.inventory[id] ?? 0));
       applyDatabaseProgress(progress);
-      if (dayChanged || scoreChanged || (route.page === 'collection' && route.tab === 'finds' && count(state.finds) !== previous)) render(false);
-      if (route.page === 'ratings') void loadRankings();
+      if (dayChanged || scoreChanged || shopChanged ||
+          (route.page === 'collection' && route.tab === 'finds' && count(state.finds) !== previous)) render(false);
+      if (['ratings','patrons'].includes(route.page)) void loadRankings();
       flushNotices();
     }
     save();
@@ -231,8 +228,9 @@ async function refreshAccount() {
 
 function applyDatabaseProgress(progress, notifyFinds = false) {
   progressRevision++;
-  const { facts, discovered, earned, reputation, daily, yesterday, lastNormalResult, calendarDay } = progress;
-  Object.assign(state, { facts, discovered, earned, paid:0, reputation, daily, lastNormalResult, calendarDay,
+  const { facts, discovered, earned, paid, inventory, donations, reputation, daily, yesterday, lastNormalResult, calendarDay } = progress;
+  Object.assign(state, { facts, discovered, earned, paid, donations, reputation, daily, lastNormalResult, calendarDay,
+    inventory:Object.assign({exclude:0,retry:0,expert:0},inventory),
     dailyYesterday:{score:yesterday} });
   serverDay = { person:progress.dailyPerson, first:progress.firstDay, entered:progress.enteredToday,
     salary:progress.salaryJoke, salaryPending:progress.salaryPending, yesterday:progress.yesterdayResult };
@@ -330,7 +328,7 @@ window.addEventListener('popstate', ({state: locationState}) => {
   }
   scrollForPop = navigation.at(-1)?.page===next.page ? navigation.at(-1).scroll || 0 : next.scroll || 0;
   restore(next,stack,scrollForPop);
-  if (next.page==='ratings') void loadRankings();
+  if (['ratings','patrons'].includes(next.page)) void loadRankings();
   if (state.pendingChapters.length) flushNotices();
 });
 function showDialog(key,title,body) {
@@ -649,6 +647,13 @@ async function performQuizRequest(request, apply) {
   }
   apply(result);
 }
+function performShop(command, apply) {
+  const id = crypto.randomUUID();
+  return performQuizRequest(() => quizProgress.shop(id,command), receipt => {
+    applyDatabaseProgress(receipt.progress,true);
+    apply(receipt);
+  });
+}
 function question() {
   const q=currentQuestion();
   const final=session.feedback!==null;
@@ -672,7 +677,7 @@ function question() {
     ${final?note(session.feedback.title,session.feedback.text,`feedback ${session.feedback.correct?'good':'bad'}`):session.rewardRetry?note('Есть вторая попытка','Выберите другой ответ.','feedback bad'):session.hints.retry?note('Право на ошибку активно','') : ''}
     <div class="question-controls">
     ${final?button(session.index+1===session.questions.length?'К результатам':'Следующий вопрос','question-next',{icon:'arrow'}):
-    !day&&!databaseProgress?button('Подсказки','hints',{style:'btn secondary',icon:'info'}):''}
+    !day?button('Подсказки','hints',{style:'btn secondary',icon:'info'}):''}
     </div>
   </div>`;
 }
@@ -683,11 +688,21 @@ function answer(index) {
   if (databaseProgress) {
     performQuizRequest(() => quizProgress.answer(session.id,session.index,index), receipt => {
       applyDatabaseProgress(receipt.progress,true);
+      if (receipt.retryAttempt) {
+        session.wrong=index;
+        session.rewardRetry=true;
+        sound.play('incorrect');
+        save();
+        render(false);
+        announces('Есть вторая попытка');
+        flushNotices();
+        return;
+      }
       session.attempted=index;
       session.feedback=receipt.feedback;
       session.finished=Boolean(receipt.result);
       if (receipt.result?.mode==='day') state.dayResults[receipt.result.day]=receipt.result;
-      q.right=receipt.right;
+      q.right=receipt.right ?? q.right;
       sound.play(receipt.feedback.correct?'correct':'incorrect');
       checkProgress(receipt.person);
       save();
@@ -831,16 +846,40 @@ function hints() {
 function applyHint(id, bought) {
   if (!session || session.mode==='day' || session.feedback || session.hints[id]) return;
   const q=currentQuestion();
+  if (databaseProgress) {
+    const command = { kind:bought?'rush':'apply', hint:id, roundId:session.id, position:session.index };
+    return performShop(command, receipt => {
+      session.hints[id]=true;
+      if (id==='exclude') session.removed=receipt.removed;
+      if (id==='expert') q.right=receipt.right;
+      showAppliedHint(id);
+    });
+  }
   if (bought) {
     if (!spend(hintInfo[id].now)) return;
     earnedFind('14');
   } else state.inventory[id]--;
   session.hints[id]=true;
   if (id==='exclude') session.removed=q.options.findIndex((value,i)=>i!==q.right && i!==session.wrong);
+  showAppliedHint(id);
+}
+function showAppliedHint(id) {
   save();
   closeDialog(false);
   render(false);
   announces(`Применено: ${hintInfo[id].name}`);
+  flushNotices();
+}
+function buyHint(id) {
+  if (databaseProgress) return performShop({kind:'buy',hint:id},finishPurchase);
+  if (!spend(hintInfo[id].before)) return;
+  state.inventory[id]++;
+  finishPurchase();
+}
+function finishPurchase() {
+  save();
+  closeDialog(false);
+  render(false);
   flushNotices();
 }
 function collection() {
@@ -887,7 +926,7 @@ function personCard(id, person) {
       <ul class="person-facts" id="person-facts-${id}">${facts}</ul>
       ${active?`<div class="research-controls" id="research-${id}"><p class="small subtle">${route.fact?'Факт выбран.':'Выберите закрытый факт для справки.'}</p>${controls}
         ${button('Закрыть исследование','toggle-research',{id,style:'person-research',attrs:'aria-expanded="true"'})}</div>`:
-        complete||databaseProgress?'':button('Исследование','toggle-research',{id,style:'person-research',attrs:`aria-label="Исследование: ${e(person.name)}" aria-expanded="false"`})}
+        complete?'':button('Исследование','toggle-research',{id,style:'person-research',attrs:`aria-label="Исследование: ${e(person.name)}" aria-expanded="false"`})}
     </div></article>`;
 }
 function category() {
@@ -920,17 +959,22 @@ function research(kind) {
 }
 function buyResearch(kind) {
   const selection=selectedResearch(kind);
-  if (!selection||!spend(selection.item.price)) return;
+  if (!selection) return;
   const personId=route.researchPerson;
+  const completePurchase = () => {
+    checkProgress(personId);
+    save();
+    closeDialog(false);
+    nextLocal({fact:null,researchPerson:isComplete(selection.person)?null:personId});
+    app.querySelector(`#card-${personId}`)?.focus({preventScroll:true});
+    announces(kind==='all'?'Оставшиеся факты восстановлены.':'Факт восстановлен.');
+    flushNotices();
+  };
+  if (databaseProgress) return performShop({kind:'research',product:kind,personId,fact:selection.ids[0]},completePurchase);
+  if (!spend(selection.item.price)) return;
   for (const id of selection.ids) state.facts[id]=true;
   earnedFind(kind==='all'?'15':'16');
-  checkProgress(personId);
-  save();
-  closeDialog(false);
-  nextLocal({fact:null,researchPerson:isComplete(selection.person)?null:personId});
-  app.querySelector(`#card-${personId}`)?.focus({preventScroll:true});
-  announces(kind==='all'?'Оставшиеся факты восстановлены.':'Факт восстановлен.');
-  flushNotices();
+  completePurchase();
 }
 function story() {
   const open=count(state.openChapters);
@@ -1045,7 +1089,7 @@ async function loadRankings() {
     console.error(error);
   } finally {
     standingsLoading = false;
-    if (route.page === 'ratings') render(false);
+    if (['ratings','patrons'].includes(route.page)) render(false);
   }
 }
 
@@ -1078,9 +1122,8 @@ function ratings() {
    </div>`;
 }
 function shop() {
-  if (databaseProgress) return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}${note('Магазин пока закрыт','Скрепки можно заработать в викторинах и получить с зарплатой.')}</div>`;
   return `<div class="stack">${heading('Магазин',`Баланс · ${amount(money())}`)}
-   ${listItem('Пополнить баланс','Пакеты скрепок за голоса VK','topup','','clip')}
+   ${databaseProgress?'':listItem('Пополнить баланс','Пакеты скрепок за голоса VK','topup','','clip')}
    <section class="stack" aria-labelledby="shop-hints">
     <h2 id="shop-hints">Подсказки</h2>
     <div class="categories">${Object.entries(hintInfo).map(([id,item])=>listItem(item.name,`В запасе: ${state.inventory[id]} · ${amount(item.before)}`,'prebuy',id,'info')).join('')}</div>
@@ -1124,7 +1167,7 @@ function fund() {
      <div class="stack compact">
        <div class="inline spread fund-stat"><span>Ваш вклад</span><strong>${amount(state.donations)}</strong></div>
        <div class="inline spread fund-stat"><span>Доступно для перевода</span><strong>${amount(state.earned)}</strong></div>
-       <p class="small subtle">Вклад хранится в этом браузере. Общий итог появится после подключения VK.</p>
+       ${databaseProgress?'':'<p class="small subtle">Вклад хранится в этом браузере. Общий итог появится после подключения VK.</p>'}
      </div>
      <form class="stack compact" id="donation" novalidate>
       <label class="field">Сумма в скрепках<input name="sum" inputmode="numeric" type="number" min="1" step="1" aria-describedby="donation-error" placeholder="Введите сумму" required></label>
@@ -1154,9 +1197,13 @@ function donate(id) {
     showDonationError(app.querySelector('#donation'),error);
     return;
   }
+  if (databaseProgress) return performShop({kind:'donate',sum},() => showDonationReceipt(sum));
   state.earned-=sum;
   state.donations+=sum;
   earnedFind('12');
+  showDonationReceipt(sum);
+}
+function showDonationReceipt(sum) {
   save();
   render(false);
   showDialog('donated','Спасибо, что поддерживаете архив!',`
@@ -1168,7 +1215,9 @@ function patrons() {
   return `<div class="stack">${heading('Почётные меценаты архива','Рейтинг переводов заработанных скрепок.')}
     <div class="note stack compact"><h2>Спасибо, что вы с нами!</h2>
       <p>${label('В рейтинге учитываются символические взносы игровыми скрепками. Спасибо каждому, кто играет, восстанавливает архив и делится заработанным. Для нас это знак поддержки.')}</p></div>
-    <p class="small subtle">Общий рейтинг появится после подключения VK.</p>
+    ${databaseProgress?`<section class="surface">${standingsError?note('Не удалось загрузить рейтинг','')+button('Повторить','rankings-retry'):
+      standings?rankList(standings.patrons):'<p role="status">Загрузка рейтинга…</p>'}</section>`:
+      '<p class="small subtle">Общий рейтинг появится после подключения VK.</p>'}
     <div class="surface inline spread"><strong>Ваш вклад</strong><span>${amount(state.donations)}</span></div></div>`;
 }
 function audioCheckbox(name,title,checked,attribute='name') {
@@ -1340,7 +1389,7 @@ const actions = {
     purchaseDialog(hintInfo[id].name,`${hintInfo[id].desc} В цену включена наценка 50%. В магазине заранее дешевле.`,hintInfo[id].now,'rush',id);},
   rush:id=>applyHint(id,true),
   prebuy:id=>purchaseDialog(hintInfo[id].name,hintInfo[id].desc,hintInfo[id].before,'buy-hint',id),
-  'buy-hint':id=>{if(!spend(hintInfo[id].before))return;state.inventory[id]++;save();closeDialog(false);render(false);flushNotices();},
+  'buy-hint':buyHint,
   'collection-tab':id=>{nextLocal({tab:id},'collection-tab');if (id==='finds') void refreshAccount();},
   category:id=>go('category',{id}),
   'category-tab':id=>nextLocal({tab:id,researchPerson:null,fact:null},'category-tab'),
@@ -1368,7 +1417,7 @@ const actions = {
   'chapter-next':advanceChapter,
   'rating-tab':id=>nextLocal({tab:id},'rating-tab'),
   'rankings-retry':()=>{void loadRankings();},
-  topup:packages, fund:()=>go('fund'), patrons:()=>go('patrons'),
+  topup:packages, fund:()=>go('fund'), patrons:()=>{go('patrons');void loadRankings();},
   donate,
   'secret-button':()=>{
     if (state.finds['29']) {

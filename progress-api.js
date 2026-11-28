@@ -25,6 +25,7 @@ export const quizProgress = {
   dayEntry: () => request('day-entry', 'POST'),
   acknowledge: notice => request('day-notice', 'POST', notice, true),
   rankings: () => request('rankings'),
+  shop: (id, command) => request(`shop/${id}`, 'PUT', command),
   start: (id, mode) => request(`quiz/${id}${mode === 'day' ? '?mode=day' : ''}`, 'PUT'),
   answer: (id, position, choice) => request(`quiz/${id}/answer`, 'POST', { position, choice }),
   abandon: id => request(`quiz/${id}`, 'DELETE'),

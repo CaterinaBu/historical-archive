@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -290,6 +290,113 @@ test('daily game survives Moscow midnight and credits each account and day once'
     assert.equal(afterAbsence.earned,170);
     assert.equal(afterAbsence.finds['26'],true);
     assert.notEqual(afterAbsence.salaryJoke,desktop.salaryJoke);
+  } finally {
+    await server?.close();
+    await database.close();
+  }
+});
+
+test('shop transactions synchronize the wallet, constrain hints, and cannot double-charge', async () => {
+  const database = await openDatabase({ directory:'memory://' });
+  let server;
+  try {
+    server = await launch(database);
+    const { cookie } = await api(server,'progress');
+    const playerId = cookie.split('=')[1];
+    const other = await api(server,'progress');
+    const progress = async player => (await api(server,'progress',{cookie:player})).payload;
+    const shop = async (body,{ operation = randomUUID(), player = cookie, status } = {}) =>
+      (await api(server,`shop/${operation}`,{method:'PUT',cookie:player,body,status})).payload;
+    const start = async (id, mode = 'normal') => api(server,`quiz/${id}?mode=${mode}`,{method:'PUT',cookie});
+    const answer = async (id,position,choice,status) =>
+      (await api(server,`quiz/${id}/answer`,{method:'POST',cookie,body:{position,choice},status})).payload;
+    await database.query('UPDATE archive_players SET earned = 5000, paid = 50 WHERE id = $1',[playerId]);
+    const operation = randomUUID();
+    const buy = {kind:'buy',hint:'exclude'};
+    const receipts = await Promise.all([shop(buy,{operation}),shop(buy,{operation})]);
+    assert.deepEqual(receipts[0],receipts[1]);
+    assert.equal(receipts[0].progress.earned,5000);
+    assert.equal(receipts[0].progress.paid,0);
+    assert.equal(receipts[0].progress.finds['21'],undefined);
+    await shop({kind:'buy',hint:'retry'},{operation,status:409});
+    await shop({kind:'buy',hint:'constructor'},{status:400});
+    await shop({kind:'buy',hint:'retry'});
+    await shop({kind:'buy',hint:'retry'});
+
+    const round = randomUUID();
+    await start(round);
+    const questions = await questionsFromDatabase(database,round);
+    const hint = (kind,hint,position = 0) => ({kind,hint,roundId:round,position});
+    const excluded = await shop(hint('apply','exclude'));
+    assert.notEqual(excluded.removed,questions[0].right);
+    assert.equal(excluded.progress.inventory.exclude,0);
+    await answer(round,0,excluded.removed,409);
+    await shop(hint('apply','exclude'),{status:409});
+    await shop(hint('apply','retry'));
+    const wrong = [0,1,2,3].find(index => index !== excluded.removed && index !== questions[0].right);
+    const missed = await answer(round,0,wrong);
+    assert.equal(missed.retryAttempt,true);
+    assert.equal(missed.progress.finds['10'],true);
+    assert.equal(missed.progress.discovered[questions[0].person],true);
+    assert.deepEqual(await answer(round,0,wrong),missed);
+    const expert = await shop(hint('rush','expert'));
+    assert.equal(expert.right,questions[0].right);
+    assert.equal(expert.progress.finds['14'],true);
+    assert.equal(expert.progress.finds['21'],true);
+    const next = await answer(round,0,questions[0].right);
+    assert.equal(next.feedback.correct,true);
+    assert.equal(next.newPerson,true);
+    assert.equal(next.progress.finds['20'],undefined);
+    await shop(hint('apply','retry',1));
+    const firstTry = await answer(round,1,questions[1].right);
+    assert.equal(firstTry.progress.finds['20'],true);
+    assert.equal(firstTry.progress.earned,4635);
+    const dayRound = randomUUID();
+    await start(dayRound,'day');
+    await shop({...hint('rush','expert'),roundId:dayRound},{status:409});
+
+    const dataset = JSON.parse(await readFile(new URL('../data/historical_archive_data.json',import.meta.url),'utf8'));
+    const personId = questions[0].person;
+    const facts = dataset.facts.filter(fact => fact.personId === personId).map(fact => fact.id);
+    const fact = facts.find(id => !firstTry.progress.facts[id]);
+    const research = {kind:'research',product:'fact',personId,fact};
+    await shop(research,{player:other.cookie,status:409});
+    await shop({...research,fact:'another-fact'},{status:409});
+    const single = await shop(research);
+    assert.equal(single.progress.earned,4135);
+    assert.equal(single.progress.facts[fact],true);
+    assert.equal(single.progress.finds['16'],true);
+    assert.equal(Object.keys(single.progress.facts).length,Object.keys(firstTry.progress.facts).length + 1);
+    await shop(research,{status:409});
+    const everything = await shop({kind:'research',product:'all',personId});
+    assert.equal(everything.progress.earned,1135);
+    assert.ok(facts.every(id => everything.progress.facts[id]));
+    assert.ok(['08','15'].every(id => everything.progress.finds[id]));
+    assert.equal(everything.progress.reputation,0);
+    assert.equal(everything.progress.daily,0);
+
+    await database.query('UPDATE archive_players SET paid = 20 WHERE id = $1',[playerId]);
+    await shop({kind:'donate',sum:1150},{status:409});
+    const transferId = randomUUID();
+    const transfer = {kind:'donate',sum:1000};
+    await shop(transfer,{operation:transferId});
+    await shop(transfer,{operation:transferId});
+    const mixed = await shop({kind:'buy',hint:'exclude'});
+    assert.equal(mixed.progress.paid,0);
+    assert.equal(mixed.progress.earned,105);
+    assert.equal(mixed.progress.donations,1000);
+    assert.equal(mixed.progress.finds['12'],true);
+    const concurrent = await Promise.all([
+      fetch(`${server.url}/api/shop/${randomUUID()}`,{method:'PUT',headers:{Cookie:cookie,'Content-Type':'application/json'},body:'{"kind":"donate","sum":100}'}),
+      fetch(`${server.url}/api/shop/${randomUUID()}`,{method:'PUT',headers:{Cookie:cookie,'Content-Type':'application/json'},body:'{"kind":"donate","sum":100}'}),
+    ]);
+    assert.deepEqual(concurrent.map(response => response.status).sort(),[200,409]);
+    const saved = await progress(cookie);
+    assert.equal(saved.earned,5);
+    assert.equal(saved.donations,1100);
+    assert.equal((await progress(other.cookie)).donations,0);
+    const {payload:ranked} = await api(server,'rankings',{cookie:other.cookie});
+    assert.deepEqual(ranked.patrons,[{place:1,score:1100,name:null,photo:null,isSelf:false}]);
   } finally {
     await server?.close();
     await database.close();

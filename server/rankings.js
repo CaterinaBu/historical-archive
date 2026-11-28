@@ -1,22 +1,24 @@
-async function ranking(connection, playerId, day) {
+async function ranking(connection, playerId, day, patrons = false) {
   const { rows } = await connection.query(`
     WITH candidates AS (
       SELECT player.id,
-             CASE WHEN $2::date IS NULL THEN player.reputation ELSE daily.score END AS score,
+             CASE WHEN $3 THEN player.donations WHEN $2::date IS NULL THEN player.reputation ELSE daily.score END AS score,
              CASE WHEN $2::date IS NULL THEN player.display_name ELSE daily.name END AS name,
              CASE WHEN $2::date IS NULL THEN player.display_photo ELSE daily.photo END AS photo
         FROM archive_players AS player
         JOIN archive_players AS viewer ON viewer.id = $1 AND player.vk_app_id IS NOT DISTINCT FROM viewer.vk_app_id
         LEFT JOIN archive_daily_scores AS daily ON daily.player_id = player.id AND daily.day = $2::date
-       WHERE ($2::date IS NULL AND (player.reputation > 0 OR player.id = $1 OR EXISTS (
+       WHERE CASE WHEN $3 THEN player.donations > 0
+                  WHEN $2::date IS NOT NULL THEN daily.player_id IS NOT NULL
+                  ELSE player.reputation > 0 OR player.id = $1 OR EXISTS (
              SELECT 1 FROM archive_quiz_rounds WHERE player_id = player.id AND finished_day IS NOT NULL
-           ))) OR ($2::date IS NOT NULL AND daily.player_id IS NOT NULL)
+           ) END
     ), ranked AS (
       SELECT *, RANK() OVER (ORDER BY score DESC)::integer AS place,
              ROW_NUMBER() OVER (ORDER BY score DESC, id) AS sequence FROM candidates
     )
     SELECT place, score, name, photo, id = $1 AS "isSelf"
-      FROM ranked WHERE sequence <= 50 OR id = $1 ORDER BY sequence`, [playerId, day]);
+      FROM ranked WHERE sequence <= 50 OR id = $1 ORDER BY sequence`, [playerId, day, patrons]);
   return rows;
 }
 
@@ -25,6 +27,7 @@ export async function rankings(connection, playerId, date, previousDate) {
     reputation: await ranking(connection, playerId, null),
     today: await ranking(connection, playerId, date),
     yesterday: await ranking(connection, playerId, previousDate),
+    patrons: await ranking(connection, playerId, null, true),
   };
 }
 

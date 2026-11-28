@@ -7,18 +7,22 @@ import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { archiveContentPaths, createArchiveContent } from '../content/load.js';
 import { audioDefaults, localFindIds } from '../content/profile-rules.js';
+import { hintInfo, researchProducts } from '../content/shop-rules.js';
 import { openDatabase } from './database.js';
-import { createQuiz, RequestError } from './quiz.js';
+import { createQuiz } from './quiz.js';
+import { RequestError } from './request-error.js';
 import { createVkLaunchVerifier } from './vk-launch.js';
 
 const cookieName = 'archive-local-player';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const playerCookie = new RegExp(`(?:^|; *)${cookieName}=(${uuid})(?:;|$)`);
 const roundRoute = new RegExp(`^/api/quiz/(${uuid})(/answer)?$`);
+const shopRoute = new RegExp(`^/api/shop/(${uuid})$`);
+const roundIdPattern = new RegExp(`^${uuid}$`);
 const root = new URL('../', import.meta.url);
 const browserFiles = new Set([
   'index.html', 'app.js', 'bootstrap.js', 'audio.js', 'daily.js', 'questions.js', 'progress-api.js', 'styles.css',
-  'content/load.js', 'content/finds.js', 'content/profile-rules.js', ...archiveContentPaths,
+  'content/load.js', 'content/finds.js', 'content/profile-rules.js', 'content/shop-rules.js', ...archiveContentPaths,
 ]);
 const contentTypes = {
   '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
@@ -90,6 +94,20 @@ async function readDisplay(request) {
   return { name: displayName, photo: displayPhoto };
 }
 
+async function readShopCommand(request) {
+  const { kind,hint,roundId,position,product,personId,fact,sum } = (await readJson(request)) ?? {};
+  const knownHint = typeof hint === 'string' && Object.hasOwn(hintInfo,hint);
+  if (kind === 'buy' && knownHint) return { kind,hint };
+  if (['apply','rush'].includes(kind) && knownHint && typeof roundId === 'string' && roundIdPattern.test(roundId) &&
+      Number.isSafeInteger(position) && position >= 0) return { kind,hint,roundId,position };
+  if (kind === 'research' && typeof product === 'string' && Object.hasOwn(researchProducts,product) &&
+      typeof personId === 'string' && (product === 'all' || typeof fact === 'string')) {
+    return { kind,product,personId,fact:product === 'fact' ? fact : null };
+  }
+  if (kind === 'donate' && Number.isSafeInteger(sum) && sum > 0 && sum <= 2147483647) return { kind,sum };
+  throw new RequestError(400, 'Проверьте параметры покупки или перевода.');
+}
+
 async function handleApi(request, response, url, quiz, vk) {
   const path = url.pathname;
   const loadProgress = request.method === 'GET' && path === '/api/progress';
@@ -111,6 +129,8 @@ async function handleApi(request, response, url, quiz, vk) {
     return json(response, 200, await quiz.progress(id));
   }
   if (!player) throw new RequestError(401, 'Откройте игру, чтобы начать тестовую сессию.');
+  const shop = path.match(shopRoute);
+  if (request.method === 'PUT' && shop) return json(response, 200, await quiz.shop(player,shop[1],await readShopCommand(request)));
   if (request.method === 'PATCH' && path === '/api/profile') return json(response, 200, await quiz.updateProfile(player, await readProfile(request)));
   if (request.method === 'PATCH' && path === '/api/display') return json(response, 200, await quiz.setDisplay(player, await readDisplay(request)));
   if (request.method === 'GET' && path === '/api/rankings') return json(response, 200, await quiz.rankings(player));
