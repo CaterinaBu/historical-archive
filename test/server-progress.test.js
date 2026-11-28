@@ -62,6 +62,7 @@ test('ordinary quiz preserves partial progress and credits a completed round onc
     assert.equal(right.progress.facts[firstQuestions[0].fact], true);
     const { payload: wrong } = await answer(first, 1, (firstQuestions[1].right + 1) % 4);
     assert.equal(wrong.feedback.correct, false);
+    assert.equal(wrong.progress.finds['10'], true);
     assert.equal(wrong.progress.discovered[firstQuestions[1].person], true);
     assert.equal(wrong.progress.facts[firstQuestions[1].fact], undefined);
     const abandon = await api(server, `quiz/${first}`, { method: 'DELETE', cookie });
@@ -87,6 +88,10 @@ test('ordinary quiz preserves partial progress and credits a completed round onc
     assert.equal(firstReply.payload.progress.daily, 10);
     await answer(full, 9, (choice + 1) % 4, 409);
 
+    const audioSettings = { music: false, effects: true, musicVolume: 34, effectsVolume: 57 };
+    await api(server, 'profile', { method: 'PATCH', cookie, body: { finds: ['25'], initialAudio: audioSettings } });
+    await database.query("UPDATE archive_players SET finds = finds - '01' - '10' WHERE id = $1", [cookie.split('=')[1]]);
+
     await server.close();
     server = null;
     await database.close();
@@ -101,6 +106,8 @@ test('ordinary quiz preserves partial progress and credits a completed round onc
     assert.equal(restored.daily, 0);
     assert.equal(restored.yesterday, 10);
     assert.deepEqual(restored.lastNormalResult, firstReply.payload.result);
+    assert.ok(['01', '10', '25'].every(id => restored.finds[id]));
+    assert.deepEqual(restored.audioSettings, audioSettings);
     const { payload: other } = await api(server, 'progress', { cookie: secondPlayer.cookie });
     assert.deepEqual(other.facts, {});
     assert.equal(other.earned, 0);
@@ -148,6 +155,17 @@ test('VK launch data identifies an account across sessions and rejects a differe
     assert.equal(first.cookie, undefined);
     assert.ok(first.payload.settingsProfile);
     assert.equal(first.payload.settingsProfile, second.payload.settingsProfile);
+    assert.equal(first.payload.audioSettings, null);
+    const initialAudio = { music: false, effects: true, musicVolume: 35, effectsVolume: 8 };
+    const profile = (body, launch = launchA, status = 200) => api(server, 'profile', { method: 'PATCH', body, ...launch, status });
+    await profile({ finds: ['25'], initialAudio });
+    await profile({ finds: ['10'], audio: { musicVolume: 101 } }, launchA, 400);
+    await profile({ finds: ['10'] }, launchA, 400);
+    await profile({ finds: ['29'] }, {}, 401);
+    await Promise.all([
+      profile({ finds: ['23'], audio: { musicVolume: 16 } }),
+      profile({ finds: ['24'], initialAudio: { ...initialAudio, music: true }, audio: { effectsVolume: 12 } }, launchB),
+    ]);
     const id = randomUUID();
     await api(server, `quiz/${id}`, { method: 'PUT', ...launchA });
     const questions = await questionsFromDatabase(database, id);
@@ -159,12 +177,16 @@ test('VK launch data identifies an account across sessions and rejects a differe
     assert.equal(restored.earned, 100);
     assert.equal(restored.reputation, 10);
     assert.equal(restored.daily, 10);
+    assert.ok(['01', '23', '24', '25'].every(id => restored.finds[id]));
+    assert.deepEqual(restored.audioSettings, { ...initialAudio, musicVolume: 16, effectsVolume: 12 });
 
     const other = { authorization: signedLaunch('1002') };
     const { payload: isolated } = await api(server, 'progress', other);
     assert.notEqual(isolated.settingsProfile, restored.settingsProfile);
     assert.deepEqual(isolated.facts, {});
     assert.equal(isolated.earned, 0);
+    assert.deepEqual(isolated.finds, {});
+    assert.equal(isolated.audioSettings, null);
     await api(server, `quiz/${id}/answer`, { method: 'POST', body: { position: 0, choice: 0 }, ...other, status: 404 });
   } finally {
     await server?.close();

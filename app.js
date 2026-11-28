@@ -3,6 +3,7 @@ import { createArchiveAudio } from './audio.js';
 import { displayField, dailyValuePools, dailyQuestionRecords } from './daily.js';
 import { createQuizBank, sample } from './questions.js';
 import { quizProgress } from './progress-api.js';
+import { audioDefaults, balanceFinds, collectionFinds, localFindIds } from './content/profile-rules.js';
 
 const DATA = await loadArchiveContent();
 const app = document.querySelector('#app');
@@ -100,12 +101,17 @@ const initialState = (today = moscowDay()) => ({
   started:false, tutorial:0, tutorialResponse:null, dayNumber:1, calendarDay:today, observedMoscowDay:today, lastSalary:0, salaryJoke:null, pendingYesterday:null,
   earned:0, paid:0, reputation:0, daily:0, playedToday:false, dailyYesterday:null, donations:0, pendingChapters:[], inventory:{exclude:0,retry:0,expert:0},
   discovered:{}, facts:{}, finds:{}, openChapters:{}, readChapters:{}, finaleAvailable:false,
-  finaleRead:false, dayResults:{}, lastNormalResult:null, audioConfigured:false, music:true, effects:false, musicVolume:35, effectsVolume:8, absence:0,
+  finaleRead:false, dayResults:{}, lastNormalResult:null, audioConfigured:false, ...audioDefaults, absence:0,
 });
 let storageKey;
 let handleStorageError;
 let storageFailed = false;
 let state;
+let accountChanges = { finds:{}, audio:{}, initialAudio:null };
+let accountWriting = false;
+let accountReading = false;
+let accountRetry;
+let audioRevision = 0;
 
 function failStorage(error) {
   storageFailed = true;
@@ -113,24 +119,97 @@ function failStorage(error) {
   handleStorageError(error);
 }
 
-function save() {
+function save(sync = true) {
   try {
     const local = databaseProgress
       ? Object.fromEntries(Object.entries(state).filter(([field]) => !databaseFields.has(field)))
       : state;
+    if (databaseProgress) local.accountChanges = accountChanges;
     localStorage.setItem(storageKey, JSON.stringify(local));
   } catch (error) {
-    if (vkLaunch && (error.name === 'SecurityError' || error.name === 'QuotaExceededError')) return;
-    failStorage(error);
-    throw error;
+    if (!vkLaunch || (error.name !== 'SecurityError' && error.name !== 'QuotaExceededError')) {
+      failStorage(error);
+      throw error;
+    }
+  }
+  if (databaseProgress && sync) void syncAccount();
+}
+
+const currentAudio = () => Object.fromEntries(Object.keys(audioDefaults).map(field => [field,state[field]]));
+
+function applyAccountFinds(finds, notify = false) {
+  for (const id of Object.keys(finds ?? {})) {
+    if (!state.finds[id] && notify) notices.push({find:id});
+    state.finds[id] = true;
   }
 }
 
-function applyDatabaseProgress(progress) {
+function applyAccountAudio(audio) {
+  if (!audio) return;
+  Object.assign(state,audio,accountChanges.audio,{audioConfigured:true});
+  sound.update(state);
+  if (modalKey === 'first-audio') closeDialog();
+  if (route.page === 'settings') {
+    for (const control of app.querySelectorAll('[data-setting], [data-volume]')) {
+      if (control.dataset.setting) control.checked = state[control.dataset.setting];
+      if (control.dataset.volume) control.value = state[control.dataset.volume];
+    }
+  }
+}
+
+async function syncAccount() {
+  if (accountWriting || accountRetry) return;
+  const finds = Object.keys(accountChanges.finds);
+  const audio = {...accountChanges.audio};
+  const {initialAudio} = accountChanges;
+  if (!finds.length && !Object.keys(audio).length && !initialAudio) return;
+  accountWriting = true;
+  const revision = audioRevision;
+  try {
+    const profile = await quizProgress.saveProfile({finds,audio,initialAudio});
+    finds.forEach(id => delete accountChanges.finds[id]);
+    for (const [field,value] of Object.entries(audio)) {
+      if (accountChanges.audio[field] === value) delete accountChanges.audio[field];
+    }
+    if (initialAudio === accountChanges.initialAudio) accountChanges.initialAudio = null;
+    applyAccountFinds(profile.finds);
+    if (initialAudio && revision === audioRevision) applyAccountAudio(profile.audioSettings);
+    save(false);
+  } catch (error) {
+    if (!error.status || error.status >= 500) {
+      accountRetry = setTimeout(() => {accountRetry = null;void syncAccount();},3000);
+    } else console.error(error);
+    return;
+  } finally {
+    accountWriting = false;
+  }
+  void syncAccount();
+}
+
+async function refreshAccount() {
+  if (!databaseProgress || !storageKey || accountReading || accountWriting || storageFailed) return;
+  accountReading = true;
+  const revision = audioRevision;
+  try {
+    const progress = await quizProgress.load();
+    const previous = count(state.finds);
+    applyAccountFinds(progress.finds);
+    if (revision === audioRevision && !accountWriting && !accountChanges.initialAudio) applyAccountAudio(progress.audioSettings);
+    if (route.page === 'collection' && route.tab === 'finds' && count(state.finds) !== previous) render(false);
+    save();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    accountReading = false;
+  }
+}
+
+function applyDatabaseProgress(progress, notifyFinds = false) {
   const { facts, discovered, earned, reputation, daily, yesterday, lastNormalResult, calendarDay } = progress;
   Object.assign(state, { facts, discovered, earned, paid:0, reputation, daily, lastNormalResult, calendarDay,
     dailyYesterday:{score:yesterday} });
   state.finaleAvailable=count(state.facts)===count(DATA.facts);
+  applyAccountFinds(progress.finds,notifyFinds);
 }
 
 const money = () => state.earned+state.paid;
@@ -254,7 +333,9 @@ function promptForAudio() {
 }
 function earnedFind(id, queue = true) {
   if (state.finds[id]) return;
+  if (databaseProgress && !localFindIds.has(id)) return;
   state.finds[id]=true;
+  if (databaseProgress) accountChanges.finds[id] = true;
   if (queue) notices.push({find:id});
 }
 function findDialogContent(id) {
@@ -308,18 +389,13 @@ function syncChapters(lineId, notify = false) {
 }
 function checkProgress(person) {
   if (person && isComplete(DATA.people[person])) {
-    earnedFind('08');
     syncChapters(categoryLines[DATA.people[person].category],true);
   }
-  const found = Object.keys(state.discovered);
-  if (found.length===count(DATA.people)) earnedFind('07');
-  if (new Set(found.map(id=>DATA.people[id].category)).size===DATA.categories.length) earnedFind('09');
+  if (!databaseProgress) collectionFinds(DATA,state,person).forEach(id => earnedFind(id));
   if (count(state.facts)===count(DATA.facts)) state.finaleAvailable=true;
 }
 function checkMoney() {
-  if (state.earned>=3000) earnedFind('22');
-  if (state.reputation>=100) earnedFind('11');
-  if (state.reputation>=500) earnedFind('13');
+  balanceFinds(state).forEach(id => earnedFind(id));
 }
 function chooseSalaryJoke() {
   const [joke]=sample(DATA.salaryJokes.filter(item=>item.id!==state.salaryJoke),1);
@@ -524,15 +600,13 @@ function answer(index) {
   if (!Number.isInteger(index) || index<0 || index>=q.options.length || session.feedback || index===session.removed || index===session.wrong) return;
   if (databaseProgress) {
     performQuizRequest(() => quizProgress.answer(session.id,session.index,index), receipt => {
-      applyDatabaseProgress(receipt.progress);
+      applyDatabaseProgress(receipt.progress,true);
       session.attempted=index;
       session.feedback=receipt.feedback;
       session.finished=Boolean(receipt.result);
       q.right=receipt.right;
       sound.play(receipt.feedback.correct?'correct':'incorrect');
-      if (!receipt.feedback.correct) earnedFind('10');
       checkProgress(receipt.person);
-      if (session.finished) checkMoney();
       save();
       render(false);
       app.querySelector('[data-action="question-next"]')?.focus({preventScroll:true});
@@ -1061,13 +1135,21 @@ function openRoot(id, params = {}) {
   flushNotices();
 }
 app.addEventListener('change', event=>{
-  const setting=event.target.dataset.setting;
-  if (setting) {state[setting]=event.target.checked;save();sound.update(state);sound.unlock(state);}
+  const {setting,volume}=event.target.dataset;
+  const field=setting || volume;
+  if (!field) return;
+  const value=setting ? event.target.checked : Number(event.target.value);
+  state[field]=value;
+  audioRevision++;
+  if (databaseProgress) accountChanges.audio[field]=value;
+  save();
+  sound.update(state);
+  if (setting) sound.unlock(state);
 });
 app.addEventListener('input', event=>{
   if (event.target.form?.id==='donation') showDonationError(event.target.form,'');
   const volume=event.target.dataset.volume;
-  if (volume) {state[volume]=Number(event.target.value);save();sound.update(state);}
+  if (volume) {state[volume]=Number(event.target.value);audioRevision++;save(false);sound.update(state);}
 });
 app.addEventListener('submit', event=>{
   event.preventDefault();
@@ -1095,12 +1177,14 @@ const actions = {
     state.music=modal.querySelector('[name="music"]').checked;
     state.effects=modal.querySelector('[name="effects"]').checked;
     state.audioConfigured=true;
+    audioRevision++;
+    if (databaseProgress) accountChanges.initialAudio=currentAudio();
     save();
     sound.unlock(state);
     closeDialog();
   },
   reputation:()=>openRoot('ratings',{tab:'reputation'}),
-  settings:()=>go('settings'), intro:()=>{redirectAfterTutorial=null;go('intro');},
+  settings:()=>{go('settings');void refreshAccount();}, intro:()=>{redirectAfterTutorial=null;go('intro');},
   'intro-prev':()=>moveIntro(-1), 'intro-next':()=>moveIntro(1),
   'training-answer':id=>{
     const replay=route.page==='intro-replay';
@@ -1129,7 +1213,7 @@ const actions = {
   rush:id=>applyHint(id,true),
   prebuy:id=>purchaseDialog(hintInfo[id].name,hintInfo[id].desc,hintInfo[id].before,'buy-hint',id),
   'buy-hint':id=>{if(!spend(hintInfo[id].before))return;state.inventory[id]++;save();closeDialog(false);render(false);flushNotices();},
-  'collection-tab':id=>nextLocal({tab:id},'collection-tab'),
+  'collection-tab':id=>{nextLocal({tab:id},'collection-tab');if (id==='finds') void refreshAccount();},
   category:id=>go('category',{id}),
   'category-tab':id=>nextLocal({tab:id,researchPerson:null,fact:null},'category-tab'),
   'toggle-research':id=>{
@@ -1173,7 +1257,7 @@ document.addEventListener('pointerdown', unlockSound, {passive:true});
 document.addEventListener('keydown', unlockSound);
 document.addEventListener('visibilitychange',()=>{
   sound.visibility();
-  if (!document.hidden) syncMoscowDay();
+  if (!document.hidden) {syncMoscowDay();void refreshAccount();}
 });
 document.addEventListener('click', event=>{
   if (!state || storageFailed || quizRequestPending) return;
@@ -1193,10 +1277,22 @@ export async function startArchive(key, onStorageError) {
     } catch (error) {
       if (!vkLaunch || error.name !== 'SecurityError') throw error;
     }
-    if (raw) state = { ...state, ...JSON.parse(raw) };
+    if (raw) {
+      const {accountChanges:pending,...cached}=JSON.parse(raw);
+      state = {...state,...cached};
+      if (pending && databaseProgress) accountChanges = pending;
+    }
     if (progress) {
+      for (const id of Object.keys(state.finds)) {
+        if (localFindIds.has(id) && !progress.finds?.[id]) accountChanges.finds[id]=true;
+      }
+      state.finds={...accountChanges.finds};
+      if (!progress.audioSettings && state.audioConfigured && !accountChanges.initialAudio) {
+        accountChanges.initialAudio=currentAudio();
+      }
       applyDatabaseProgress(progress);
-      if (vkLaunch && count(state.discovered)) state.started = true;
+      applyAccountAudio(progress.audioSettings);
+      if (state.finds['01'] || (vkLaunch && count(state.discovered))) state.started = true;
     }
     Object.keys(storyProgress).forEach(lineId => syncChapters(lineId));
     save();

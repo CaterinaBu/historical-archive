@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createQuizBank } from '../questions.js';
 import { displayField } from '../daily.js';
+import { audioDefaults, balanceFinds, collectionFinds } from '../content/profile-rules.js';
 
 const moscowDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' });
 const dateFor = now => moscowDate.format(now());
@@ -14,11 +15,11 @@ export class RequestError extends Error {
   }
 }
 
-async function lockPlayer(connection, playerId) {
+async function lockPlayer(connection, playerId, required = true) {
   const { rows: [player] } = await connection.query(
     'SELECT * FROM archive_players WHERE id = $1 FOR UPDATE', [playerId],
   );
-  if (!player) throw new RequestError(401, 'Тестовая сессия закончилась. Откройте игру заново.');
+  if (!player && required) throw new RequestError(401, 'Тестовая сессия закончилась. Откройте игру заново.');
   return player;
 }
 
@@ -31,7 +32,8 @@ async function findRound(connection, playerId, id) {
 
 async function progress(connection, playerId, date) {
   const { rows: [row] } = await connection.query(`
-    SELECT player.facts, player.discovered, player.earned, player.reputation,
+    SELECT player.facts, player.discovered, player.earned, player.reputation, player.finds,
+           player.audio_settings AS "audioSettings",
            player.last_normal_result AS "lastNormalResult",
            COALESCE(day_scores.today, 0)::integer AS daily,
            day_scores.yesterday::integer AS yesterday
@@ -50,7 +52,40 @@ export function createQuiz(database, data, now = () => new Date()) {
   const bank = createQuizBank(data);
 
   return {
-    progress: playerId => progress(database, playerId, dateFor(now)),
+    progress(playerId) {
+      return database.transaction(async connection => {
+        const player = await lockPlayer(connection, playerId, false);
+        if (!player) return null;
+        const awards = [...collectionFinds(data, player), ...balanceFinds(player)];
+        if (Object.keys(player.discovered).length) awards.push('01');
+        if (!player.finds['10']) {
+          const { rows: [row] } = await connection.query(`SELECT EXISTS (
+            SELECT 1 FROM archive_quiz_rounds AS round,
+              jsonb_array_elements(round.answers) AS answer
+            WHERE round.player_id = $1 AND answer #>> '{feedback,correct}' = 'false'
+          ) AS incorrect`, [playerId]);
+          if (row.incorrect) awards.push('10');
+        }
+        const missing = awards.filter(id => !player.finds[id]);
+        if (missing.length) {
+          await connection.query('UPDATE archive_players SET finds = finds || $2::jsonb WHERE id = $1',
+            [playerId, JSON.stringify(Object.fromEntries(missing.map(id => [id, true])))]);
+        }
+        return progress(connection, playerId, dateFor(now));
+      });
+    },
+    async updateProfile(playerId, { finds, audio, initialAudio }) {
+      const { rows: [profile] } = await database.query(`UPDATE archive_players
+        SET finds = finds || $2::jsonb,
+            audio_settings = CASE
+              WHEN $3::jsonb = '{}'::jsonb AND $4::jsonb IS NULL THEN audio_settings
+              ELSE COALESCE(audio_settings, $4::jsonb, $5::jsonb) || $3::jsonb
+            END
+        WHERE id = $1 RETURNING finds, audio_settings AS "audioSettings"`,
+      [playerId, JSON.stringify(finds), JSON.stringify(audio), initialAudio && JSON.stringify(initialAudio), JSON.stringify(audioDefaults)]);
+      if (!profile) throw new RequestError(401, 'Тестовая сессия закончилась. Откройте игру заново.');
+      return profile;
+    },
     createPlayer: playerId => database.query('INSERT INTO archive_players (id) VALUES ($1)', [playerId]),
     async vkPlayer(appId, userId, create) {
       if (create) {
@@ -130,11 +165,14 @@ export function createQuiz(database, data, now = () => new Date()) {
             newPeople: round.answers.filter(answer => answer.newPerson).length,
           };
         }
+        const awards = ['01', ...collectionFinds(data, player, question.person),
+          ...balanceFinds({ earned: player.earned + reward, reputation: player.reputation + score })];
+        if (!correct) awards.push('10');
         await connection.query(`UPDATE archive_players
              SET facts = $2::jsonb, discovered = $3::jsonb, earned = earned + $4, reputation = reputation + $5,
-                 last_normal_result = COALESCE($6::jsonb, last_normal_result)
+                 last_normal_result = COALESCE($6::jsonb, last_normal_result), finds = finds || $7::jsonb
            WHERE id = $1`, [playerId, JSON.stringify(player.facts), JSON.stringify(player.discovered), reward, score,
-          finished ? JSON.stringify(receipt.result) : null]);
+          finished ? JSON.stringify(receipt.result) : null, JSON.stringify(Object.fromEntries(awards.map(id => [id, true])))]);
         await connection.query(`UPDATE archive_quiz_rounds
              SET answers = $3::jsonb, status = $4, finished_day = $5, score = $6
            WHERE player_id = $1 AND id = $2`, [playerId, id, JSON.stringify(round.answers),

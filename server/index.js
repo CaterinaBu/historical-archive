@@ -6,6 +6,7 @@ import { extname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { archiveContentPaths, createArchiveContent } from '../content/load.js';
+import { audioDefaults, localFindIds } from '../content/profile-rules.js';
 import { openDatabase } from './database.js';
 import { createQuiz, RequestError } from './quiz.js';
 import { createVkLaunchVerifier } from './vk-launch.js';
@@ -17,7 +18,7 @@ const roundRoute = new RegExp(`^/api/quiz/(${uuid})(/answer)?$`);
 const root = new URL('../', import.meta.url);
 const browserFiles = new Set([
   'index.html', 'app.js', 'bootstrap.js', 'audio.js', 'daily.js', 'questions.js', 'progress-api.js', 'styles.css',
-  'content/load.js', 'content/finds.js', ...archiveContentPaths,
+  'content/load.js', 'content/finds.js', 'content/profile-rules.js', ...archiveContentPaths,
 ]);
 const contentTypes = {
   '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
@@ -30,26 +31,53 @@ function json(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-async function readAnswer(request) {
+async function readJson(request) {
   if (request.headers['content-type'] !== 'application/json') throw new RequestError(415, 'Ожидается JSON.');
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 1024) throw new RequestError(413, 'Ответ слишком длинный.');
+    if (size > 1024) throw new RequestError(413, 'Запрос слишком длинный.');
     chunks.push(chunk);
   }
-  let payload;
   try {
-    payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new RequestError(400, 'Ответ не удалось прочитать.');
+    throw new RequestError(400, 'Запрос не удалось прочитать.');
   }
-  const { position, choice } = payload ?? {};
+}
+
+async function readAnswer(request) {
+  const { position, choice } = (await readJson(request)) ?? {};
   if (!Number.isInteger(position) || position < 0 || position >= 10 || !Number.isInteger(choice) || choice < 0 || choice >= 4) {
     throw new RequestError(400, 'Номер вопроса или ответа вне диапазона.');
   }
   return { position, choice };
+}
+
+const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
+
+function validAudio(audio, full = false) {
+  if (!isRecord(audio)) return false;
+  const fields = Object.keys(audio);
+  if (full && fields.length !== Object.keys(audioDefaults).length) return false;
+  return fields.every(field => {
+    if (!Object.hasOwn(audioDefaults, field)) return false;
+    const value = audio[field];
+    return typeof audioDefaults[field] === 'boolean' ? typeof value === 'boolean'
+      : Number.isInteger(value) && value >= 0 && value <= 100;
+  });
+}
+
+async function readProfile(request) {
+  const payload = await readJson(request);
+  if (!isRecord(payload)) throw new RequestError(400, 'Неверные данные профиля.');
+  const { finds = [], audio = {}, initialAudio = null } = payload;
+  if (!Array.isArray(finds) || finds.length > localFindIds.size || !finds.every(id => localFindIds.has(id)) ||
+      !validAudio(audio) || (initialAudio !== null && !validAudio(initialAudio, true))) {
+    throw new RequestError(400, 'Неверные данные находок или звука.');
+  }
+  return { finds: Object.fromEntries(finds.map(id => [id, true])), audio, initialAudio };
 }
 
 async function handleApi(request, response, path, quiz, vk) {
@@ -70,6 +98,10 @@ async function handleApi(request, response, path, quiz, vk) {
     await quiz.createPlayer(id);
     response.setHeader('Set-Cookie', `${cookieName}=${id}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict`);
     return json(response, 200, await quiz.progress(id));
+  }
+  if (request.method === 'PATCH' && path === '/api/profile') {
+    if (!player) throw new RequestError(401, 'Откройте игру, чтобы начать тестовую сессию.');
+    return json(response, 200, await quiz.updateProfile(player, await readProfile(request)));
   }
   const round = path.match(roundRoute);
   if (!round) throw new RequestError(404, 'Адрес не найден.');

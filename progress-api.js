@@ -1,9 +1,9 @@
 const vkLaunch = document.body.dataset.platform === 'vk';
 const vkParams = vkLaunch ? window.location.search.slice(1) : '';
 
-async function request(path, method = 'GET', body) {
+async function request(path, method = 'GET', body, keepalive = false) {
   const headers = {};
-  const options = { method, headers, signal: AbortSignal.timeout(10000) };
+  const options = { method, headers, keepalive, signal: AbortSignal.timeout(10000) };
   if (vkLaunch) {
     if (vkParams) headers.Authorization = `Bearer ${vkParams}`;
     options.credentials = 'omit';
@@ -20,6 +20,7 @@ async function request(path, method = 'GET', body) {
 
 export const quizProgress = {
   load: () => request('progress'),
+  saveProfile: profile => request('profile', 'PATCH', profile, true),
   start: id => request(`quiz/${id}`, 'PUT'),
   answer: (id, position, choice) => request(`quiz/${id}/answer`, 'POST', { position, choice }),
   abandon: id => request(`quiz/${id}`, 'DELETE'),

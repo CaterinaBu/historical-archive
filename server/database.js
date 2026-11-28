@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 export async function openDatabase({ url, directory = '.local-postgres' } = {}) {
-  const migrations = await Promise.all(['001-quiz-progress.sql', '002-vk-identity.sql']
+  const migrations = await Promise.all(['001-quiz-progress.sql', '002-vk-identity.sql', '003-account-profile.sql']
     .map(file => readFile(new URL(file, import.meta.url), 'utf8')));
   if (!url) {
     const { PGlite } = await import('@electric-sql/pglite');
